@@ -2,8 +2,8 @@
 """Small Ubuntu helper for observing solution_server.py RSS memory over time.
 
 Examples:
-  python monitor_server.py --match solution_server.py --duration 60
-  python monitor_server.py --pid 12345 --duration 60 --output memory.csv
+  python test/monitor_server.py --match solution_server.py --duration 60
+  python test/monitor_server.py --pid 12345 --duration 60 --output memory.csv
 
 This is an observation aid, not part of the grading protocol.
 """
@@ -23,7 +23,12 @@ def find_pid(match: str) -> int | None:
         if not entry.name.isdigit() or int(entry.name) == me:
             continue
         try:
-            cmd = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore")
+            cmd = (
+                (entry / "cmdline")
+                .read_bytes()
+                .replace(b"\0", b" ")
+                .decode(errors="ignore")
+            )
         except (OSError, PermissionError):
             continue
         if match in cmd:

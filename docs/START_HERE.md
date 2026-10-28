@@ -2,11 +2,11 @@
 
 This package gives you a **working naive baseline** plus public test tools. It is not a complete graded solution.
 
-The baseline is intended to let you see `caption_source.py -> solution_server.py -> browser/load clients` working immediately. The networking mechanisms that distinguish strong submissions remain TODOs.
+The baseline is intended to let you see `test/caption_source.py -> submission_root/solution_server.py -> browser/load clients` working immediately. The networking mechanisms that distinguish strong submissions remain TODOs.
 
 ## What is already provided
 
-- required `python solution_server.py --port <port>` startup path;
+- required `python solution_server.py --port <port>` startup path from `submission_root/`;
 - basic WebSocket source/client connection handling;
 - naive direct broadcast of caption updates;
 - deterministic caption generator;
@@ -29,24 +29,19 @@ The baseline is intended to let you see `caption_source.py -> solution_server.py
 ## Quick start
 
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip iproute2
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python submission_check.py
+make install
 ```
 
 Basic public experiment:
 
 ```bash
-python run_demo.py --clients 20 --duration 20 --runs 1
+make demo
 ```
 
 For results used in the report, use three independent runs:
 
 ```bash
-python run_demo.py --clients 100 --duration 40 --runs 3 --output-stem t2
+make report-demo
 ```
 
 See `PUBLIC_TESTS.md` for T1-T5.
@@ -67,13 +62,13 @@ These guides explain mechanics, not the optimal design.
 During development:
 
 ```bash
-python submission_check.py
+make check
 ```
 
 Before submission, after you have created the required final files:
 
 ```bash
-python submission_check.py --final
+make check-final
 ```
 
 The instructor reference implementation and hidden evaluator are not included. Do not modify the public measurement logic when reporting the required public-test results.

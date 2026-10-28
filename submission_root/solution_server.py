@@ -3,7 +3,7 @@
 CS3103 Assignment 4 - LiveRecall naive working baseline.
 
 This starter is intentionally useful but incomplete. It provides the required
-CLI and a basic WebSocket broadcaster so that caption_source.py -> server ->
+CLI and a basic WebSocket broadcaster so that test/caption_source.py -> server ->
 browser/load clients works on day one.
 
 It DOES NOT implement the graded networking mechanisms:
@@ -14,7 +14,7 @@ It DOES NOT implement the graded networking mechanisms:
   - semantic coalescing / backpressure
   - constrained-bandwidth overload handling
 
-Required evaluator command:
+Required evaluator command (run from submission_root/):
     python solution_server.py --port 8765
 
 Teams should replace or substantially extend the implementation while keeping
@@ -100,7 +100,9 @@ async def handle_client(ws, hello: dict[str, Any]) -> None:
             pass
     finally:
         CLIENTS.discard(ws)
-        print(f"client disconnected: id={client_id}; clients={len(CLIENTS)}", flush=True)
+        print(
+            f"client disconnected: id={client_id}; clients={len(CLIENTS)}", flush=True
+        )
 
 
 async def handler(ws) -> None:

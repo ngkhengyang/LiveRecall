@@ -2,10 +2,10 @@
 """Deterministic caption/revision generator for LiveRecall.
 
 Examples:
-  python caption_source.py
-  python caption_source.py --segments 40
-  python caption_source.py --duration 120
-  python caption_source.py --transcript sample_transcript.txt --repeat 3
+  python test/caption_source.py
+  python test/caption_source.py --segments 40
+  python test/caption_source.py --duration 120
+  python test/caption_source.py --transcript test/sample_transcript.txt --repeat 3
 
 Each segment is completed before the next segment starts. Segment numbers are
 monotonically increasing from 1. Each segment has three revisions in this
@@ -100,12 +100,16 @@ async def run(args) -> None:
             segment += 1
             await asyncio.sleep(args.segment_gap)
 
-        await ws.send(json.dumps({
-            "type": "SOURCE_DONE",
-            "session": args.session,
-            "source_ts": time.time(),
-            "segments": emitted_segments,
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "SOURCE_DONE",
+                    "session": args.session,
+                    "source_ts": time.time(),
+                    "segments": emitted_segments,
+                }
+            )
+        )
 
     print(f"SOURCE_DONE: emitted {emitted_segments} finalized segments", flush=True)
 
@@ -115,16 +119,34 @@ def main() -> None:
     p.add_argument("--uri", default="ws://127.0.0.1:8765")
     p.add_argument("--session", default="L1")
     p.add_argument("--transcript", help="One sentence per line")
-    p.add_argument("--segments", type=int,
-                   help="Emit exactly this many finalized segments, cycling the transcript")
-    p.add_argument("--duration", type=float,
-                   help="Long/demo mode: keep cycling the transcript for about this many seconds")
-    p.add_argument("--repeat", type=int, default=1,
-                   help="Transcript cycles when --segments/--duration aren't supplied")
-    p.add_argument("--revision-delay", type=float, default=0.20,
-                   help="Seconds between provisional revisions")
-    p.add_argument("--segment-gap", type=float, default=0.35,
-                   help="Seconds after a final revision before the next segment")
+    p.add_argument(
+        "--segments",
+        type=int,
+        help="Emit exactly this many finalized segments, cycling the transcript",
+    )
+    p.add_argument(
+        "--duration",
+        type=float,
+        help="Long/demo mode: keep cycling the transcript for about this many seconds",
+    )
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Transcript cycles when --segments/--duration aren't supplied",
+    )
+    p.add_argument(
+        "--revision-delay",
+        type=float,
+        default=0.20,
+        help="Seconds between provisional revisions",
+    )
+    p.add_argument(
+        "--segment-gap",
+        type=float,
+        default=0.35,
+        help="Seconds after a final revision before the next segment",
+    )
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
 
