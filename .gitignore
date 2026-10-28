@@ -2,3 +2,7 @@ venv/
 .venv/
 __pycache__/
 *.py[cod]
+
+# Demo results for local testing
+demo_results.csv
+demo_results.json
