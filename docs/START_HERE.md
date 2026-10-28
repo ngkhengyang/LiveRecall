@@ -29,19 +29,25 @@ The baseline is intended to let you see `test/caption_source.py -> submission_ro
 ## Quick start
 
 ```bash
-make install
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip iproute2
+python3 -m venv venv
+./venv/bin/python -m pip install -r submission_root/requirements.txt
+./venv/bin/python -m pip install -r config/requirements-dev.txt
+./venv/bin/pre-commit install --config config/.pre-commit-config.yaml
+./venv/bin/python test/submission_check.py
 ```
 
 Basic public experiment:
 
 ```bash
-make demo
+./venv/bin/python test/run_demo.py --clients 20 --duration 20 --runs 1
 ```
 
 For results used in the report, use three independent runs:
 
 ```bash
-make report-demo
+./venv/bin/python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem t2
 ```
 
 See `PUBLIC_TESTS.md` for T1-T5.
@@ -62,13 +68,13 @@ These guides explain mechanics, not the optimal design.
 During development:
 
 ```bash
-make check
+./venv/bin/python test/submission_check.py
 ```
 
 Before submission, after you have created the required final files:
 
 ```bash
-make check-final
+./venv/bin/python test/submission_check.py --final
 ```
 
 The instructor reference implementation and hidden evaluator are not included. Do not modify the public measurement logic when reporting the required public-test results.
