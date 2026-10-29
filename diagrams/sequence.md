@@ -1,3 +1,6 @@
+# LiveRecall - proposed application sequence
+
+```mermaid
 sequenceDiagram
     title LiveRecall - proposed application sequence
     participant Source as Source (caption_source.py)
@@ -83,3 +86,4 @@ sequenceDiagram
         end
         Note over Service,ClientB: When pressure clears, resume full revision delivery.<br/>Normal clients remain independent of slow clients.
     end
+```
