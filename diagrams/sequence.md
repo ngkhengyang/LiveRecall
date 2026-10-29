@@ -1,89 +1,136 @@
-# LiveRecall - proposed application sequence
+# LiveRecall - component interaction sequence
+
+This diagram describes the proposed implementation. The components are logical responsibilities within the existing Python server and JavaScript client, not separate services or a requirement for one file per component.
+
+- Member 1 owns caption state, revision rules, and bounded recovery history.
+- Member 2 owns connection handling, per-client buffers, and sender tasks.
+- Member 3 owns browser connection management, local caption state, and the UI.
+- Member 4 owns integration checks and experiments using the supplied source and load clients. Simulated clients connect through the same protocol as browsers.
+
+`cursor` below is shorthand for the required `last_segment` and `last_revision` fields in `CLIENT_HELLO`, not a new protocol field.
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"darkMode": true, "background": "#111827", "primaryColor": "#263449", "primaryTextColor": "#f8fafc", "primaryBorderColor": "#94a3b8", "lineColor": "#cbd5e1", "textColor": "#f8fafc", "actorBkg": "#263449", "actorBorder": "#94a3b8", "actorTextColor": "#f8fafc", "actorLineColor": "#94a3b8", "signalColor": "#e2e8f0", "signalTextColor": "#f8fafc", "noteBkgColor": "#374151", "noteBorderColor": "#94a3b8", "noteTextColor": "#f8fafc", "labelBoxBkgColor": "#263449", "labelBoxBorderColor": "#94a3b8", "labelTextColor": "#f8fafc", "loopTextColor": "#f8fafc"}}}%%
 sequenceDiagram
-    title LiveRecall - proposed application sequence
-    participant Source as Source (caption_source.py)
-    participant Service as LiveRecall service (solution_server.py)
-    participant ClientA as Browser client A
-    participant ClientB as Browser client B
-
-    Note over Source,ClientB: Proposed required behavior, the starter does not yet implement every step.
-
-    rect rgb(240, 245, 255)
-        Note over Source,ClientB: Connection and live revision replacement
-        Source->>Service: Open WebSocket, SOURCE_HELLO(session=L1)
-        ClientA->>Service: Open WebSocket, CLIENT_HELLO(last_segment=0, last_revision=0, history_seconds=60)
-        Service-->>ClientA: HISTORY(items=[])
-
-        Source->>Service: CAPTION_UPDATE(segment=1, revision=1, final=false)
-        Service->>Service: Validate revision, update active segment state
-        Service-->>ClientA: CAPTION_UPDATE(segment=1, revision=1, final=false)
-        ClientA->>ClientA: Display provisional caption
-
-        Source->>Service: CAPTION_UPDATE(segment=1, revision=2, final=false)
-        Service->>Service: Accept newer revision, replace active state
-        Service-->>ClientA: CAPTION_UPDATE(segment=1, revision=2, final=false)
-        ClientA->>ClientA: Replace segment 1 row
-
-        Source->>Service: CAPTION_UPDATE(segment=1, revision=3, final=true)
-        Service->>Service: Store final in bounded rolling history, expire old state
-        Service-->>ClientA: CAPTION_UPDATE(segment=1, revision=3, final=true)
-        ClientA->>ClientA: Finalize row, retain local final history, advance resume position
-        Note over Source,Service: Three revisions are illustrative, revision counts are not fixed.
-        Note over Service,ClientB: Each client has an independent sender and bounded pending buffer.
+    title LiveRecall - source, service components, and client components
+    participant Source as Caption source
+    box rgb(25, 38, 55) Service
+        participant Handler as Connection handlers
+        participant State as Caption state and final history
+        participant Buffer as Per-client outbound buffer
+        participant Sender as Per-client sender task
+    end
+    box rgb(26, 43, 36) Clients - one browser shown
+        participant Connection as Browser connection manager
+        participant Local as Local caption state
+        participant UI as Caption and recall UI
     end
 
-    rect rgb(240, 255, 240)
-        Note over ClientA,ClientB: Local recall and late join
-        ClientA->>ClientA: Select What did I miss?, display last 30 seconds
-        ClientA->>ClientA: Select 15 / 30 / 60 seconds, filter local finalized history
-        Note right of ClientA: Keep at least 60 seconds locally.<br/>Normal recall does not request server data.
+    Note over Handler,Sender: One shared caption state, one bounded buffer and sender per client.<br/>Source handling never waits for client network sends.
+    Note over Connection,UI: Each browser has its own connection manager, state, and UI.<br/>These are logical parts of app.js, not separate applications.
 
-        ClientB->>Service: Open WebSocket, CLIENT_HELLO(last_segment=0, last_revision=0, history_seconds=60)
-        Service->>Service: Snapshot recent finals and register live delivery without a gap
-        Service-->>ClientB: HISTORY(items=[segment 1 final])
-        ClientB->>ClientB: Merge by segment and revision, show recent context
-        Note over Service,ClientB: HISTORY contains finals only, oldest first, then live updates follow.
+    rect rgb(28, 42, 61)
+        Note over Source,UI: 1. Initial connection or late join
+        Source->>Handler: Open WebSocket, SOURCE_HELLO(session=L1)
+        Connection->>Local: Read latest finalized resume position
+        Local-->>Connection: last_segment and last_revision, or 0 and 0
+        Connection->>Handler: Open WebSocket, CLIENT_HELLO(cursor, history_seconds=60)
+        Note over Handler,Buffer: Prepare recovery and register live delivery without yielding.<br/>Queue HISTORY before any live updates for this client.
+        Handler->>State: Get recent finals after reported cursor, up to 60 seconds
+        State-->>Handler: Final captions ordered oldest first, or an empty list
+        Handler->>Buffer: Create client buffer and enqueue HISTORY(items)
+        Handler->>Handler: Register client for subsequent live updates
+        Handler->>Sender: Start sender for this connection
+        Sender->>Buffer: Take next message
+        Buffer-->>Sender: HISTORY(items)
+        Sender-->>Connection: Send HISTORY over WebSocket
+        Connection->>Local: Merge recovered finals by segment and revision
+        Local->>Local: Reject duplicates and stale revisions, retain at least 60 seconds
+        Local-->>UI: Ordered recent captions
+        Connection-->>UI: Show connected status
     end
 
-    rect rgb(255, 250, 235)
-        Note over Source,ClientB: Temporary disconnect and incremental recovery
-        ClientA--xService: Connection lost
-        ClientA->>ClientA: Show disconnected status, schedule automatic retry
-
-        loop Revisions of segment 2, ending with its final
-            Source->>Service: CAPTION_UPDATE(segment=2, revision=r, final=...)
-            Service->>Service: Update state, retain final when completed
-            Service-->>ClientB: CAPTION_UPDATE(segment=2, revision=r, final=...)
-            ClientB->>ClientB: Merge revision, update displayed row
-        end
-
-        ClientA->>Service: Reconnect, CLIENT_HELLO(last_segment=1, last_revision=3, history_seconds=60)
-        Service->>Service: Select recent missed finals, exclude reported finalized state
-        Service-->>ClientA: HISTORY(items=[segment 2 final])
-        ClientA->>ClientA: Merge history, reject duplicate/stale state, advance finalized resume position
-        Note over Service,ClientA: No full lecture replay, recovery is limited to the retained recent window.
-    end
-
-    rect rgb(255, 240, 240)
-        Note over Source,ClientB: Live delivery and semantic backpressure
-        loop New caption updates
-            Source->>Service: CAPTION_UPDATE
-            Service->>Service: Validate and update state, offer to each client's buffer
-            Service-->>ClientA: Send live update independently
-            ClientA->>ClientA: Merge revision and refresh display
-
-            alt Client B keeps up
-                Service-->>ClientB: Send every accepted revision in order
-            else Client B has measurable backlog or send lag
-                Service->>Service: Coalesce B's superseded provisional updates
-                Note over Service,ClientB: Preserve every pending final in segment order<br/>and the latest useful active-segment revision.<br/>Bound application and transport buffering.
-                Service-->>ClientB: Send preserved finals and latest useful state as capacity permits
+    rect rgb(27, 46, 38)
+        Note over Source,UI: 2. Live updates, revision replacement, and backpressure
+        par Source ingestion and fan-out
+            loop Each source revision, with any number of revisions per segment
+                Source->>Handler: CAPTION_UPDATE(segment, revision, source_ts, final, text)
+                Handler->>State: Validate and apply revision
+                alt Duplicate, stale, or attempts to change a finalized segment
+                    State-->>Handler: Reject, do not broadcast
+                else Valid newer state
+                    State->>State: Replace active revision, retain final when completed, expire old state
+                    State-->>Handler: Accepted update
+                    loop Each connected client
+                        Handler->>Buffer: Offer accepted update without waiting for a send
+                        alt Client has no backlog or send lag
+                            Buffer->>Buffer: Queue every revision in order
+                        else Client is falling behind
+                            Buffer->>Buffer: Coalesce superseded provisional revisions
+                            Note over State,Buffer: Preserve finals in segment order and latest useful active state.<br/>Do not drop a final to make room for a provisional update.
+                        end
+                        Buffer-->>Sender: Signal pending work
+                    end
+                end
             end
-
-            ClientB->>ClientB: Merge by segment and revision, never replace newer state with older state
+        and Independent delivery for each client
+            loop While connection is open and messages are pending
+                Sender->>Buffer: Take next message
+                Buffer-->>Sender: Next live update, after initial HISTORY
+                Sender-->>Connection: Send CAPTION_UPDATE over WebSocket
+                Sender->>Buffer: Report send lag and transport pressure
+                Note over Buffer,Sender: If a send stalls, only this sender waits.<br/>Keep pending work bounded and avoid flooding transport buffers.<br/>Resume full revision delivery when pressure clears.
+                Connection->>Local: Apply live update by segment and revision
+                alt Duplicate or older revision
+                    Local->>Local: Ignore update
+                else Newer accepted revision
+                    Local->>Local: Replace segment state, retain finals, advance finalized cursor
+                    Local-->>UI: Update existing segment row, distinguish provisional and final
+                end
+            end
         end
-        Note over Service,ClientB: When pressure clears, resume full revision delivery.<br/>Normal clients remain independent of slow clients.
+    end
+
+    rect rgb(49, 43, 29)
+        Note over Connection,UI: 3. Recall uses local finalized state
+        UI->>Local: What did I miss? Request previous 30 seconds
+        Local-->>UI: Final captions in selected time window
+        UI->>Local: Change window to 15, 30, or 60 seconds
+        Local-->>UI: Filter locally retained finals
+        Note over Connection,UI: No server request during normal recall.
+    end
+
+    rect rgb(49, 35, 33)
+        Note over Source,UI: 4. Temporary disconnect and incremental recovery
+        Connection--xHandler: WebSocket connection lost
+        Handler->>Handler: Unregister disconnected client
+        Handler->>Sender: Cancel sender and release connection resources
+        Handler->>Buffer: Discard this connection's pending buffer
+        Connection-->>UI: Show disconnected or reconnecting status
+        Note over Connection,Local: Retain browser state and finalized cursor across connection retries.
+
+        loop Source continues while this browser is offline
+            Source->>Handler: CAPTION_UPDATE
+            Handler->>State: Apply accepted update and retain recent finals
+            Note over Handler,Sender: Continue delivering to other connected clients independently.
+        end
+
+        Connection->>Connection: Wait for short capped retry delay
+        Connection->>Local: Read latest finalized cursor, not latest provisional revision
+        Local-->>Connection: last_segment and last_revision
+        Connection->>Handler: Reconnect, CLIENT_HELLO(cursor, history_seconds=60)
+        Note over Handler,Buffer: Repeat the same recovery-before-live registration procedure.
+        Handler->>State: Get recent missed finals after finalized cursor
+        State-->>Handler: Ordered finals within requested retained window
+        Handler->>Buffer: Create new buffer, enqueue HISTORY first
+        Handler->>Handler: Register connection for live updates
+        Handler->>Sender: Start new per-client sender
+        Sender->>Buffer: Take recovery message
+        Buffer-->>Sender: HISTORY(missed finals)
+        Sender-->>Connection: Send HISTORY, then queued live updates
+        Connection->>Local: Merge recovery without duplicate or stale final state
+        Local-->>UI: Refresh captions and recall history
+        Connection-->>UI: Show connected status
+        Note over State,Local: Recovery covers the bounded recent window, not the entire lecture.<br/>Do not advance the finalized cursor past missing earlier finals.
     end
 ```
