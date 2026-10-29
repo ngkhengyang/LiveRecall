@@ -317,7 +317,7 @@ def main():
     p.add_argument("--session", default="L1")
     p.add_argument("--clients", type=int, default=100)
     p.add_argument("--duration", type=float, default=60)
-    p.add_argument("--output", default="results.csv")
+    p.add_argument("--output", default="output/results.csv")
     p.add_argument("--seed", type=int, default=3103)
     p.add_argument("--history-seconds", type=int, default=30)
 

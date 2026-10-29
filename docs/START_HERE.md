@@ -47,7 +47,7 @@ Basic public experiment:
 For results used in the report, use three independent runs:
 
 ```bash
-./venv/bin/python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem t2
+./venv/bin/python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem output/t2
 ```
 
 See `PUBLIC_TESTS.md` for T1-T5.

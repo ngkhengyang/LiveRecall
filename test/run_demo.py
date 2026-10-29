@@ -64,6 +64,7 @@ def one_run(args, run_no, here):
     suffix = f"_run{run_no:02d}" if args.runs > 1 else ""
     output_path = here / f"{args.output_stem}{suffix}.csv"
     json_path = here / f"{args.output_stem}{suffix}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     segments = args.source_segments or default_source_segments(
         args.duration, args.source_start_delay
@@ -200,7 +201,7 @@ def main():
         help="Independent experiment runs (use 3 for reported public tests)",
     )
     p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--output-stem", default="demo_results")
+    p.add_argument("--output-stem", default="output/demo_results")
     p.add_argument(
         "--source-segments",
         type=int,
@@ -247,9 +248,7 @@ def main():
         raise SystemExit(str(e))
 
     print_medians(summaries)
-    print(
-        "\nPublic run complete. CSV and JSON result files were written in the project root."
-    )
+    print("\nPublic run complete. CSV and JSON result files were written in output/.")
 
 
 if __name__ == "__main__":

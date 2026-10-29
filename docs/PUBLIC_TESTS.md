@@ -7,7 +7,7 @@ Use these tests to diagnose your design. They do not reveal the hidden final wor
 ## T1 - Basic correctness
 
 ```bash
-python test/run_demo.py --clients 20 --duration 20 --runs 3 --output-stem t1
+python test/run_demo.py --clients 20 --duration 20 --runs 3 --output-stem output/t1
 ```
 
 Look for: final completeness, duplicate/stale state, normal revision coverage, and unexpected connection errors.
@@ -15,7 +15,7 @@ Look for: final completeness, duplicate/stale state, normal revision coverage, a
 ## T2 - Public scale
 
 ```bash
-python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem t2
+python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem output/t2
 ```
 
 Look for: P50/P95/P99 Caption Age, Fresh Caption Ratio, Fresh Final Caption Ratio, completeness, and coverage.
@@ -24,7 +24,7 @@ Look for: P50/P95/P99 Caption Age, Fresh Caption Ratio, Fresh Final Caption Rati
 
 ```bash
 python test/run_demo.py --clients 100 --duration 60 --runs 3 \
-  --slow-percent 10 --slow-ms 500 --output-stem t3
+  --slow-percent 10 --slow-ms 500 --output-stem output/t3
 ```
 
 The analyser reports normal and slow clients separately. A useful design goal is that slow readers do not make normal readers stale or cause unbounded resource growth.
@@ -32,7 +32,7 @@ The analyser reports normal and slow clients separately. A useful design goal is
 Optional memory observation in another terminal:
 
 ```bash
-python test/monitor_server.py --match solution_server.py --duration 60 --output t3_memory.csv
+python test/monitor_server.py --match solution_server.py --duration 60 --output output/t3_memory.csv
 ```
 
 ## T4 - Reconnect
@@ -40,7 +40,7 @@ python test/monitor_server.py --match solution_server.py --duration 60 --output 
 ```bash
 python test/run_demo.py --clients 100 --duration 60 --runs 3 \
   --disconnect-percent 20 --disconnect-at 15 --disconnect-seconds 5 \
-  --output-stem t4
+  --output-stem output/t4
 ```
 
 Look for: recovery timing, final completeness, and no duplicate/stale final state. A fast empty HISTORY response is not correct recovery; completeness still matters.
@@ -56,7 +56,7 @@ sudo ./network_profiles/delay_loss.sh lo
 Then run, for example:
 
 ```bash
-python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem t5
+python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem output/t5
 ```
 
 Always reset afterwards:

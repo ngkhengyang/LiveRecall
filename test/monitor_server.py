@@ -52,7 +52,7 @@ def main():
     p.add_argument("--match", default="solution_server.py")
     p.add_argument("--interval", type=float, default=1.0)
     p.add_argument("--duration", type=float, default=60.0)
-    p.add_argument("--output", default="memory_rss.csv")
+    p.add_argument("--output", default="output/memory_rss.csv")
     args = p.parse_args()
 
     pid = args.pid or find_pid(args.match)
@@ -73,7 +73,9 @@ def main():
         print(f"{elapsed:7.1f}s  {mb:8.2f} MB")
         time.sleep(args.interval)
 
-    with open(args.output, "w", newline="", encoding="utf-8") as f:
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["elapsed_s", "rss_mb"])
         w.writerows((f"{a:.3f}", f"{b:.3f}") for a, b in rows)
