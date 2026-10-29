@@ -18,9 +18,20 @@ from pathlib import Path
 import websockets
 
 CSV_FIELDS = [
-    "client_id", "slow", "disconnecting", "late", "connection_no",
-    "event_type", "segment", "revision", "final", "source_ts",
-    "receive_ts", "latency_ms", "status", "recovery_ms",
+    "client_id",
+    "slow",
+    "disconnecting",
+    "late",
+    "connection_no",
+    "event_type",
+    "segment",
+    "revision",
+    "final",
+    "source_ts",
+    "receive_ts",
+    "latency_ms",
+    "status",
+    "recovery_ms",
 ]
 
 
@@ -93,35 +104,46 @@ async def simulated_client(client_id, args, logger, slow, disconnecting, late):
             ) as ws:
                 connection_no += 1
                 connected_epoch = time.time()
-                await logger.write({
-                    **role,
-                    "connection_no": connection_no,
-                    "event_type": "CONNECT",
-                    "receive_ts": f"{connected_epoch:.6f}",
-                    "status": "reconnect" if connection_no > 1 else "initial",
-                })
+                await logger.write(
+                    {
+                        **role,
+                        "connection_no": connection_no,
+                        "event_type": "CONNECT",
+                        "receive_ts": f"{connected_epoch:.6f}",
+                        "status": "reconnect" if connection_no > 1 else "initial",
+                    }
+                )
 
-                await ws.send(json.dumps({
-                    "type": "CLIENT_HELLO",
-                    "client_id": client_id,
-                    "session": args.session,
-                    "last_segment": last_final_segment,
-                    "last_revision": last_final_revision,
-                    "history_seconds": args.history_seconds,
-                }))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "CLIENT_HELLO",
+                            "client_id": client_id,
+                            "session": args.session,
+                            "last_segment": last_final_segment,
+                            "last_revision": last_final_revision,
+                            "history_seconds": args.history_seconds,
+                        }
+                    )
+                )
 
                 while time.monotonic() < end_time:
                     elapsed_global = time.monotonic() - global_start
-                    if (disconnecting and not disconnected_once
-                            and elapsed_global >= args.disconnect_at):
+                    if (
+                        disconnecting
+                        and not disconnected_once
+                        and elapsed_global >= args.disconnect_at
+                    ):
                         disconnected_once = True
-                        await logger.write({
-                            **role,
-                            "connection_no": connection_no,
-                            "event_type": "FORCED_DISCONNECT",
-                            "receive_ts": f"{time.time():.6f}",
-                            "status": "test",
-                        })
+                        await logger.write(
+                            {
+                                **role,
+                                "connection_no": connection_no,
+                                "event_type": "FORCED_DISCONNECT",
+                                "receive_ts": f"{time.time():.6f}",
+                                "status": "test",
+                            }
+                        )
                         await ws.close()
                         await asyncio.sleep(args.disconnect_seconds)
                         break
@@ -136,13 +158,15 @@ async def simulated_client(client_id, args, logger, slow, disconnecting, late):
                     try:
                         msg = json.loads(raw)
                     except json.JSONDecodeError:
-                        await logger.write({
-                            **role,
-                            "connection_no": connection_no,
-                            "event_type": "INVALID_JSON",
-                            "receive_ts": f"{recv_ts:.6f}",
-                            "status": "invalid",
-                        })
+                        await logger.write(
+                            {
+                                **role,
+                                "connection_no": connection_no,
+                                "event_type": "INVALID_JSON",
+                                "receive_ts": f"{recv_ts:.6f}",
+                                "status": "invalid",
+                            }
+                        )
                         continue
 
                     if msg.get("type") == "CAPTION_UPDATE":
@@ -154,23 +178,26 @@ async def simulated_client(client_id, args, logger, slow, disconnecting, late):
 
                         if status == "accepted" and is_final:
                             final_seen.add(seg)
-                            if (seg > last_final_segment or
-                                    (seg == last_final_segment and rev > last_final_revision)):
+                            if seg > last_final_segment or (
+                                seg == last_final_segment and rev > last_final_revision
+                            ):
                                 last_final_segment = seg
                                 last_final_revision = rev
 
-                        await logger.write({
-                            **role,
-                            "connection_no": connection_no,
-                            "event_type": "CAPTION_UPDATE",
-                            "segment": seg,
-                            "revision": rev,
-                            "final": int(is_final),
-                            "source_ts": f"{src:.6f}",
-                            "receive_ts": f"{recv_ts:.6f}",
-                            "latency_ms": f"{(recv_ts-src)*1000.0:.3f}",
-                            "status": status,
-                        })
+                        await logger.write(
+                            {
+                                **role,
+                                "connection_no": connection_no,
+                                "event_type": "CAPTION_UPDATE",
+                                "segment": seg,
+                                "revision": rev,
+                                "final": int(is_final),
+                                "source_ts": f"{src:.6f}",
+                                "receive_ts": f"{recv_ts:.6f}",
+                                "latency_ms": f"{(recv_ts-src)*1000.0:.3f}",
+                                "status": status,
+                            }
+                        )
 
                         if slow:
                             await asyncio.sleep(args.slow_ms / 1000.0)
@@ -178,14 +205,16 @@ async def simulated_client(client_id, args, logger, slow, disconnecting, late):
                     elif msg.get("type") == "HISTORY":
                         items = msg.get("items", [])
                         recovery_ms = (recv_ts - connected_epoch) * 1000.0
-                        await logger.write({
-                            **role,
-                            "connection_no": connection_no,
-                            "event_type": "HISTORY",
-                            "receive_ts": f"{recv_ts:.6f}",
-                            "status": f"{len(items)} items",
-                            "recovery_ms": f"{recovery_ms:.3f}",
-                        })
+                        await logger.write(
+                            {
+                                **role,
+                                "connection_no": connection_no,
+                                "event_type": "HISTORY",
+                                "receive_ts": f"{recv_ts:.6f}",
+                                "status": f"{len(items)} items",
+                                "recovery_ms": f"{recovery_ms:.3f}",
+                            }
+                        )
 
                         for item in items:
                             seg = int(item["segment"])
@@ -201,36 +230,42 @@ async def simulated_client(client_id, args, logger, slow, disconnecting, late):
 
                             if status == "recovered":
                                 final_seen.add(seg)
-                                if (seg > last_final_segment or
-                                        (seg == last_final_segment and rev > last_final_revision)):
+                                if seg > last_final_segment or (
+                                    seg == last_final_segment
+                                    and rev > last_final_revision
+                                ):
                                     last_final_segment = seg
                                     last_final_revision = rev
 
-                            await logger.write({
-                                **role,
-                                "connection_no": connection_no,
-                                "event_type": "HISTORY_ITEM",
-                                "segment": seg,
-                                "revision": rev,
-                                "final": int(is_final),
-                                "source_ts": f"{src:.6f}",
-                                "receive_ts": f"{recv_ts:.6f}",
-                                "latency_ms": f"{(recv_ts-src)*1000.0:.3f}",
-                                "status": status,
-                                "recovery_ms": f"{recovery_ms:.3f}",
-                            })
+                            await logger.write(
+                                {
+                                    **role,
+                                    "connection_no": connection_no,
+                                    "event_type": "HISTORY_ITEM",
+                                    "segment": seg,
+                                    "revision": rev,
+                                    "final": int(is_final),
+                                    "source_ts": f"{src:.6f}",
+                                    "receive_ts": f"{recv_ts:.6f}",
+                                    "latency_ms": f"{(recv_ts-src)*1000.0:.3f}",
+                                    "status": status,
+                                    "recovery_ms": f"{recovery_ms:.3f}",
+                                }
+                            )
 
                         if slow and items:
                             await asyncio.sleep(args.slow_ms / 1000.0)
 
         except (OSError, websockets.exceptions.WebSocketException) as e:
-            await logger.write({
-                **role,
-                "connection_no": connection_no,
-                "event_type": "CONNECT_ERROR",
-                "receive_ts": f"{time.time():.6f}",
-                "status": type(e).__name__,
-            })
+            await logger.write(
+                {
+                    **role,
+                    "connection_no": connection_no,
+                    "event_type": "CONNECT_ERROR",
+                    "receive_ts": f"{time.time():.6f}",
+                    "status": type(e).__name__,
+                }
+            )
             await asyncio.sleep(0.4)
 
 
@@ -246,8 +281,8 @@ async def main_async(args):
 
     # Roles are disjoint in the public harness to make results easy to interpret.
     slow_ids = set(ids[:n_slow])
-    disc_ids = set(ids[n_slow:n_slow+n_disc])
-    late_ids = set(ids[n_slow+n_disc:n_slow+n_disc+n_late])
+    disc_ids = set(ids[n_slow : n_slow + n_disc])
+    late_ids = set(ids[n_slow + n_disc : n_slow + n_disc + n_late])
 
     logger = CSVLogger(args.output)
     await logger.open()
@@ -259,12 +294,16 @@ async def main_async(args):
     )
 
     tasks = [
-        asyncio.create_task(simulated_client(
-            i, args, logger,
-            slow=i in slow_ids,
-            disconnecting=i in disc_ids,
-            late=i in late_ids,
-        ))
+        asyncio.create_task(
+            simulated_client(
+                i,
+                args,
+                logger,
+                slow=i in slow_ids,
+                disconnecting=i in disc_ids,
+                late=i in late_ids,
+            )
+        )
         for i in range(n)
     ]
     await asyncio.gather(*tasks)
@@ -278,7 +317,7 @@ def main():
     p.add_argument("--session", default="L1")
     p.add_argument("--clients", type=int, default=100)
     p.add_argument("--duration", type=float, default=60)
-    p.add_argument("--output", default="results.csv")
+    p.add_argument("--output", default="output/results.csv")
     p.add_argument("--seed", type=int, default=3103)
     p.add_argument("--history-seconds", type=int, default=30)
 

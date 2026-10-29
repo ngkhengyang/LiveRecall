@@ -18,6 +18,8 @@ pip install -r requirements.txt
 
 ## Required server
 
+Run from the submission directory (`submission_root/` in this repository):
+
 ```bash
 python solution_server.py --port 8765
 ```
@@ -32,7 +34,7 @@ Exact commands and configuration used for T1-T5, including independent runs.
 
 ## Mandatory deterministic application demo
 
-Exact commands/steps for `caption_source.py`, browser clients, revision replacement, recall, late join, and reconnect/recovery.
+Exact commands/steps for `test/caption_source.py`, browser clients, revision replacement, recall, late join, and reconnect/recovery.
 
 ## Design notes
 

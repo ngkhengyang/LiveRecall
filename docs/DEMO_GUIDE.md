@@ -7,13 +7,13 @@ No ASR or speech-recognition setup is required.
 Terminal 1:
 
 ```bash
-python solution_server.py --port 8765
+python submission_root/solution_server.py --port 8765
 ```
 
 Terminal 2 (serve the browser files):
 
 ```bash
-python -m http.server 8000 --directory client
+python -m http.server 8000 --directory submission_root/client
 ```
 
 Open `http://127.0.0.1:8000` in at least two browser tabs/windows.
@@ -21,7 +21,7 @@ Open `http://127.0.0.1:8000` in at least two browser tabs/windows.
 Terminal 3, use long/demo mode so the 60-second recall view is meaningful:
 
 ```bash
-python caption_source.py --duration 120
+python test/caption_source.py --duration 120
 ```
 
 ## Demonstrate

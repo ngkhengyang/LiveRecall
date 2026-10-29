@@ -38,7 +38,8 @@ def safe_float(value):
 
 def role_stats(rows, slow_value, threshold_ms):
     subset = [
-        r for r in rows
+        r
+        for r in rows
         if r["event_type"] == "CAPTION_UPDATE"
         and r.get("slow", "0") == str(slow_value)
         and r.get("status") == "accepted"
@@ -55,14 +56,18 @@ def role_stats(rows, slow_value, threshold_ms):
     }
 
 
-def analyse_file(csv_file, expected_finals=None, expected_updates=None,
-                 fresh_threshold_ms=500.0):
+def analyse_file(
+    csv_file, expected_finals=None, expected_updates=None, fresh_threshold_ms=500.0
+):
     with open(csv_file, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
-    caption_rows = [r for r in rows if r["event_type"] in ("CAPTION_UPDATE", "HISTORY_ITEM")]
+    caption_rows = [
+        r for r in rows if r["event_type"] in ("CAPTION_UPDATE", "HISTORY_ITEM")
+    ]
     accepted_live = [
-        r for r in rows
+        r
+        for r in rows
         if r["event_type"] == "CAPTION_UPDATE" and r["status"] == "accepted"
     ]
     accepted_or_recovered = [
@@ -91,7 +96,9 @@ def analyse_file(csv_file, expected_finals=None, expected_updates=None,
         if r["final"] == "1":
             final_by_client[r["client_id"]].add(int(r["segment"]))
     for r in accepted_live:
-        live_update_by_client[r["client_id"]].add((int(r["segment"]), int(r["revision"])))
+        live_update_by_client[r["client_id"]].add(
+            (int(r["segment"]), int(r["revision"]))
+        )
 
     summary = {
         "clients": len(clients),
@@ -107,12 +114,16 @@ def analyse_file(csv_file, expected_finals=None, expected_updates=None,
     }
 
     if latencies:
-        summary.update({
-            "p50_ms": percentile(latencies, 50),
-            "p95_ms": percentile(latencies, 95),
-            "p99_ms": percentile(latencies, 99),
-            "fresh_pct": pct(sum(x <= fresh_threshold_ms for x in latencies), len(latencies)),
-        })
+        summary.update(
+            {
+                "p50_ms": percentile(latencies, 50),
+                "p95_ms": percentile(latencies, 95),
+                "p99_ms": percentile(latencies, 99),
+                "fresh_pct": pct(
+                    sum(x <= fresh_threshold_ms for x in latencies), len(latencies)
+                ),
+            }
+        )
 
     if final_first_latency:
         fresh_final_count = sum(
@@ -138,7 +149,9 @@ def analyse_file(csv_file, expected_finals=None, expected_updates=None,
         total_unique_updates = sum(len(live_update_by_client[c]) for c in clients)
         summary["unique_live_revisions"] = total_unique_updates
         summary["expected_updates_total"] = total_expected_updates
-        summary["normal_update_coverage_pct"] = pct(total_unique_updates, total_expected_updates)
+        summary["normal_update_coverage_pct"] = pct(
+            total_unique_updates, total_expected_updates
+        )
 
     normal_stats = role_stats(rows, 0, fresh_threshold_ms)
     slow_stats = role_stats(rows, 1, fresh_threshold_ms)
@@ -184,16 +197,22 @@ def print_summary(s, threshold_ms=500.0):
         print(f"P99 caption age:               {s['p99_ms']:.2f} ms")
         print(f"Fresh Caption Ratio (<={threshold_ms:.0f} ms): {s['fresh_pct']:.2f}%")
     if "fresh_final_pct" in s:
-        print(f"Fresh Final Caption Ratio (<={threshold_ms:.0f} ms): {s['fresh_final_pct']:.2f}%")
+        print(
+            f"Fresh Final Caption Ratio (<={threshold_ms:.0f} ms): {s['fresh_final_pct']:.2f}%"
+        )
 
     print(f"Successful connections:        {s.get('connections', 0)}")
     print(f"Connection errors:             {s.get('connection_errors', 0)}")
 
     if "final_completeness_pct" in s:
-        print(f"Unique final captions:         {s['unique_finals']}/{s['expected_finals_total']}")
+        print(
+            f"Unique final captions:         {s['unique_finals']}/{s['expected_finals_total']}"
+        )
         print(f"Final-caption completeness:    {s['final_completeness_pct']:.2f}%")
     if "normal_update_coverage_pct" in s:
-        print(f"Unique live revisions:         {s['unique_live_revisions']}/{s['expected_updates_total']}")
+        print(
+            f"Unique live revisions:         {s['unique_live_revisions']}/{s['expected_updates_total']}"
+        )
         print(f"Normal Update Coverage:        {s['normal_update_coverage_pct']:.2f}%")
 
     if "slow_clients" in s:
@@ -202,19 +221,25 @@ def print_summary(s, threshold_ms=500.0):
         n = s.get("normal_clients")
         q = s.get("slow_clients")
         if n:
-            print(f"Normal clients: P50={n['p50_ms']:.2f} ms, P95={n['p95_ms']:.2f} ms, "
-                  f"Fresh={n['fresh_pct']:.2f}% ({n['messages']} msgs)")
+            print(
+                f"Normal clients: P50={n['p50_ms']:.2f} ms, P95={n['p95_ms']:.2f} ms, "
+                f"Fresh={n['fresh_pct']:.2f}% ({n['messages']} msgs)"
+            )
         if q:
-            print(f"Slow clients:   P50={q['p50_ms']:.2f} ms, P95={q['p95_ms']:.2f} ms, "
-                  f"Fresh={q['fresh_pct']:.2f}% ({q['messages']} msgs)")
+            print(
+                f"Slow clients:   P50={q['p50_ms']:.2f} ms, P95={q['p95_ms']:.2f} ms, "
+                f"Fresh={q['fresh_pct']:.2f}% ({q['messages']} msgs)"
+            )
 
     if "recovery_p50_ms" in s:
         print("\nReconnect / late-join HISTORY response")
         print("--------------------------------------")
         print(f"Recovery P50: {s['recovery_p50_ms']:.2f} ms")
         print(f"Recovery P95: {s['recovery_p95_ms']:.2f} ms")
-        print("Note: fast HISTORY response alone does not prove correct recovery; "
-              "check final completeness and duplicate/stale counts too.")
+        print(
+            "Note: fast HISTORY response alone does not prove correct recovery; "
+            "check final completeness and duplicate/stale counts too."
+        )
 
 
 def main():
@@ -235,7 +260,9 @@ def main():
     print_summary(summary, args.fresh_threshold_ms)
 
     if args.json_output:
-        Path(args.json_output).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        Path(args.json_output).write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
 
 
 if __name__ == "__main__":

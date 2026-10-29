@@ -18,6 +18,13 @@ import sys
 import time
 from pathlib import Path
 
+TEST_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = TEST_DIR.parent
+SERVER_PATH = PROJECT_ROOT / "submission_root" / "solution_server.py"
+CLIENT_PATH = TEST_DIR / "load_clients.py"
+SOURCE_PATH = TEST_DIR / "caption_source.py"
+ANALYSIS_PATH = TEST_DIR / "analyse_results.py"
+
 from analyse_results import analyse_file, print_summary
 
 
@@ -57,6 +64,7 @@ def one_run(args, run_no, here):
     suffix = f"_run{run_no:02d}" if args.runs > 1 else ""
     output_path = here / f"{args.output_stem}{suffix}.csv"
     json_path = here / f"{args.output_stem}{suffix}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     segments = args.source_segments or default_source_segments(
         args.duration, args.source_start_delay
@@ -65,10 +73,12 @@ def one_run(args, run_no, here):
     server = clients = None
     try:
         print(f"\n=== Run {run_no}/{args.runs} ===")
-        print(f"Clients={args.clients}, duration={args.duration}s, source segments={segments}")
+        print(
+            f"Clients={args.clients}, duration={args.duration}s, source segments={segments}"
+        )
 
         server = subprocess.Popen(
-            [sys.executable, "-u", "solution_server.py", "--port", str(args.port)],
+            [sys.executable, "-u", str(SERVER_PATH), "--port", str(args.port)],
             cwd=here,
             stdout=subprocess.DEVNULL if args.quiet_server else None,
             stderr=subprocess.STDOUT if args.quiet_server else None,
@@ -76,20 +86,35 @@ def one_run(args, run_no, here):
         wait_for_port(args.port, server)
 
         client_cmd = [
-            sys.executable, "-u", "load_clients.py",
-            "--uri", uri,
-            "--clients", str(args.clients),
-            "--duration", str(args.duration),
-            "--output", str(output_path),
-            "--history-seconds", str(args.history_seconds),
-            "--slow-percent", str(args.slow_percent),
-            "--slow-ms", str(args.slow_ms),
-            "--disconnect-percent", str(args.disconnect_percent),
-            "--disconnect-at", str(args.disconnect_at),
-            "--disconnect-seconds", str(args.disconnect_seconds),
-            "--late-percent", str(args.late_percent),
-            "--late-seconds", str(args.late_seconds),
-            "--seed", str(args.seed),
+            sys.executable,
+            "-u",
+            str(CLIENT_PATH),
+            "--uri",
+            uri,
+            "--clients",
+            str(args.clients),
+            "--duration",
+            str(args.duration),
+            "--output",
+            str(output_path),
+            "--history-seconds",
+            str(args.history_seconds),
+            "--slow-percent",
+            str(args.slow_percent),
+            "--slow-ms",
+            str(args.slow_ms),
+            "--disconnect-percent",
+            str(args.disconnect_percent),
+            "--disconnect-at",
+            str(args.disconnect_at),
+            "--disconnect-seconds",
+            str(args.disconnect_seconds),
+            "--late-percent",
+            str(args.late_percent),
+            "--late-seconds",
+            str(args.late_seconds),
+            "--seed",
+            str(args.seed),
         ]
         clients = subprocess.Popen(client_cmd, cwd=here)
         time.sleep(args.source_start_delay)
@@ -98,9 +123,13 @@ def one_run(args, run_no, here):
 
         source_rc = subprocess.run(
             [
-                sys.executable, "-u", "caption_source.py",
-                "--uri", uri,
-                "--segments", str(segments),
+                sys.executable,
+                "-u",
+                str(SOURCE_PATH),
+                "--uri",
+                uri,
+                "--segments",
+                str(segments),
                 "--quiet",
             ],
             cwd=here,
@@ -163,12 +192,21 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--clients", type=int, default=20)
     p.add_argument("--duration", type=float, default=20)
-    p.add_argument("--runs", "--repeat", dest="runs", type=int, default=1,
-                   help="Independent experiment runs (use 3 for reported public tests)")
+    p.add_argument(
+        "--runs",
+        "--repeat",
+        dest="runs",
+        type=int,
+        default=1,
+        help="Independent experiment runs (use 3 for reported public tests)",
+    )
     p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--output-stem", default="demo_results")
-    p.add_argument("--source-segments", type=int,
-                   help="Override automatically chosen number of source segments")
+    p.add_argument("--output-stem", default="output/demo_results")
+    p.add_argument(
+        "--source-segments",
+        type=int,
+        help="Override automatically chosen number of source segments",
+    )
     p.add_argument("--history-seconds", type=int, default=30)
     p.add_argument("--fresh-threshold-ms", type=float, default=500.0)
     p.add_argument("--seed", type=int, default=3103)
@@ -189,10 +227,16 @@ def main():
     if args.duration <= 2:
         p.error("--duration should be > 2 seconds")
 
-    here = Path(__file__).resolve().parent
-    for name in ["solution_server.py", "load_clients.py", "caption_source.py", "analyse_results.py"]:
-        if not (here / name).exists():
-            raise SystemExit(f"Required file missing: {name}")
+    here = PROJECT_ROOT
+    required_files = [
+        SERVER_PATH,
+        CLIENT_PATH,
+        SOURCE_PATH,
+        ANALYSIS_PATH,
+    ]
+    for path in required_files:
+        if not path.exists():
+            raise SystemExit(f"Required file missing: {path.relative_to(here)}")
 
     summaries = []
     try:
@@ -204,7 +248,7 @@ def main():
         raise SystemExit(str(e))
 
     print_medians(summaries)
-    print("\nPublic run complete. CSV and JSON result files were written beside run_demo.py.")
+    print("\nPublic run complete. CSV and JSON result files were written in output/.")
 
 
 if __name__ == "__main__":
