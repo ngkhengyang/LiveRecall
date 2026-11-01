@@ -1,5 +1,6 @@
 # Package Contents
 
+- `docs/REPORT.md` - shared technical-report draft with section ownership, required content, and results placeholders; export the completed report to `submission_root/report.pdf`.
 - `submission_root/solution_server.py` - working naive broadcaster baseline; graded mechanisms intentionally absent.
 - `test/caption_source.py` - deterministic revision source; exact-segment and long/demo modes.
 - `test/load_clients.py` - scalable clients with role labels, finalized resume state, and history duplicate/stale checks.

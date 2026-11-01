@@ -15,9 +15,10 @@
 (function () {
   "use strict";
 
-  // Keep well over the 60 s the recall window needs, while still bounded.
+  // Expire finals by age so bursts cannot shorten the 60 s recall window.
+  // The count backstop applies only to unfinished segments.
   var RETENTION_SECONDS = 150;
-  var MAX_SEGMENTS = 400;
+  var MAX_ACTIVE_SEGMENTS = 400;
   var MAX_ROWS = 80;
   var RECONNECT_BASE_MS = 500;
   var RECONNECT_MAX_MS = 5000;
@@ -84,15 +85,20 @@
 
   CaptionState.prototype.prune = function () {
     var cutoff = nowSeconds() - RETENTION_SECONDS;
-    var keys = Array.from(this.segments.keys()).sort(function (a, b) {
+    var active = [];
+    var segments = this.segments;
+    segments.forEach(function (caption, segment) {
+      if (caption.final) {
+        if (caption.sourceTs < cutoff) segments.delete(segment);
+      } else {
+        active.push(segment);
+      }
+    });
+    active.sort(function (a, b) {
       return a - b;
     });
-    for (var i = 0; i < keys.length; i++) {
-      var caption = this.segments.get(keys[i]);
-      var tooOld = caption.final && caption.sourceTs < cutoff;
-      var tooMany = this.segments.size > MAX_SEGMENTS;
-      if (!tooOld && !tooMany) break;
-      this.segments.delete(keys[i]);
+    for (var i = 0; i < active.length - MAX_ACTIVE_SEGMENTS; i++) {
+      segments.delete(active[i]);
     }
   };
 

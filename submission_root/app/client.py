@@ -115,7 +115,9 @@ class Client:
         # await in between.
         self.server.register_client(self)
         items = self.server.compute_history(
-            self.hello.last_segment, self.hello.last_revision
+            self.hello.last_segment,
+            self.hello.last_revision,
+            self.hello.history_seconds,
         )
         print(
             f"client connected: id={self.hello.client_id}; "

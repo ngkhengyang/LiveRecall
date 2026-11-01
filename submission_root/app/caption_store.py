@@ -22,6 +22,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable
 
 from .protocol import CaptionUpdate
 
@@ -54,20 +55,20 @@ class SegmentState:
 class CaptionStore:
     """Current state per segment plus a bounded window of finalized captions."""
 
-    # Recovery requests ask for at most 60 s of context, so a 90 s window is
-    # comfortably sufficient while still being a hard, stated bound. The item
-    # cap is the backstop for a source that emits far faster than the public
-    # generator's ~0.75 s/segment.
+    # Bound final history by age, not count: a burst must not evict finals
+    # still needed for a 60 s recovery request. Memory scales with the source
+    # rate within this fixed window, rather than the full lecture duration.
     HISTORY_HORIZON_SECONDS = 90.0
-    HISTORY_MAX_ITEMS = 2000
 
     # Backstop for a pathological source that opens segments without ever
-    # finalizing them: such segments never enter the history, so the time and
-    # item bounds above would not reclaim them.
-    MAX_TRACKED_SEGMENTS = 4000
+    # finalizing them: such segments never enter the history, so its age
+    # cutoff would not reclaim them.
+    MAX_ACTIVE_SEGMENTS = 4000
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
         self._segments: dict[int, SegmentState] = {}
+        self._active_segments: set[int] = set()
         self._final_history: deque[SegmentState] = deque()
         # Segments below this watermark have been evicted from the bounded
         # history. Rejecting them keeps a stale revision for a long-forgotten
@@ -82,6 +83,7 @@ class CaptionStore:
         Returning ``None`` means "do not broadcast this" -- it is a duplicate,
         a stale revision, or an attempt to revise an already-final segment.
         """
+        self._trim_history()
         if update.segment < self._retired_before:
             return None
 
@@ -92,56 +94,61 @@ class CaptionStore:
             if update.revision <= existing.revision:
                 return None
 
-        state = SegmentState(update=update, received_at=time.monotonic())
+        state = SegmentState(update=update, received_at=self._clock())
         self._segments[update.segment] = state
 
         if update.final:
+            self._active_segments.discard(update.segment)
             self._final_history.append(state)
             self._trim_history()
+        else:
+            self._active_segments.add(update.segment)
         self._trim_segments()
         return update
 
     # -- recovery -------------------------------------------------------
 
     def compute_history(
-        self, last_segment: int, last_revision: int
+        self, last_segment: int, last_revision: int, history_seconds: float = 60.0
     ) -> list[CaptionUpdate]:
         """Finalized captions newer than the client's latest finalized state.
 
         Ordered oldest to newest (the deque is in append order). Only finals
         are ever returned, which is what the resume contract requires.
 
-        The client's requested ``history_seconds`` is deliberately *not* used
-        to shrink this result. The bounded window is already the cap, and a
-        client can only be harmed by receiving fewer finals than it missed:
-        anything it already holds is excluded by the ``(segment, revision)``
-        comparison below, so sending the whole window costs a late joiner
-        nothing and maximizes the finals it recovers.
+        Expire history even when the source is idle. The requested window is
+        measured since server acceptance using the same monotonic clock as
+        retention, independently of source/client wall-clock skew. The 90 s
+        storage margin does not enlarge the client's requested 0--60 s view.
         """
+        self._trim_history()
+        if history_seconds <= 0:
+            return []
+        cutoff = self._clock() - min(history_seconds, 60.0)
         marker = (last_segment, last_revision)
         return [
             state.update
             for state in self._final_history
-            if (state.segment, state.revision) > marker
+            if state.received_at >= cutoff and (state.segment, state.revision) > marker
         ]
 
     # -- bounds ---------------------------------------------------------
 
     def _trim_history(self) -> None:
-        cutoff = time.monotonic() - self.HISTORY_HORIZON_SECONDS
-        while self._final_history and (
-            len(self._final_history) > self.HISTORY_MAX_ITEMS
-            or self._final_history[0].received_at < cutoff
-        ):
+        cutoff = self._clock() - self.HISTORY_HORIZON_SECONDS
+        while self._final_history and self._final_history[0].received_at < cutoff:
             evicted = self._final_history.popleft()
             self._retire(evicted.segment)
 
     def _trim_segments(self) -> None:
-        while len(self._segments) > self.MAX_TRACKED_SEGMENTS:
-            self._retire(min(self._segments))
+        # Only unfinished segments need a count backstop. Finals are reclaimed
+        # by _trim_history so the required recovery window remains intact.
+        while len(self._active_segments) > self.MAX_ACTIVE_SEGMENTS:
+            self._retire(min(self._active_segments))
 
     def _retire(self, segment: int) -> None:
         self._segments.pop(segment, None)
+        self._active_segments.discard(segment)
         self._retired_before = max(self._retired_before, segment + 1)
 
     # -- observability --------------------------------------------------
