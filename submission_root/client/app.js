@@ -266,6 +266,7 @@
     this.ws = null;
     this.retries = 0;
     this.timer = null;
+    this.reconnectNotBefore = 0;
     this.manualClose = false;
   }
 
@@ -368,6 +369,7 @@
       RECONNECT_MAX_MS,
       RECONNECT_BASE_MS * Math.pow(2, this.retries)
     );
+    delay = Math.max(delay, this.reconnectNotBefore - Date.now());
     this.retries += 1;
     var seconds = (delay / 1000).toFixed(1);
     this.view.setStatus("reconnecting in " + seconds + "s", "connecting");
@@ -377,8 +379,9 @@
     }, delay);
   };
 
-  Connection.prototype.dropNow = function () {
+  Connection.prototype.dropNow = function (durationMs) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.reconnectNotBefore = Date.now() + durationMs;
       this.view.setStatus("disconnected (simulated)", "offline");
       this.ws.close();
     }
@@ -409,8 +412,10 @@
   document.getElementById("refresh").addEventListener("click", function () {
     view.renderRecall();
   });
+  var disconnectMs = document.getElementById("disconnect-ms");
   document.getElementById("drop").addEventListener("click", function () {
-    connection.dropNow();
+    if (!disconnectMs.reportValidity()) return;
+    connection.dropNow(disconnectMs.valueAsNumber);
   });
 
   // Ages shown in the recall list drift as time passes even with no traffic.

@@ -97,7 +97,7 @@
     .caption.is-final .badge { background: var(--final-bg); color: var(--final); }
 
     .controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .8rem; }
-    button {
+    button, input {
       font: inherit; font-size: .92rem; padding: .5rem .9rem; cursor: pointer;
       border-radius: 7px; border: 1px solid var(--border);
       background: var(--surface); color: var(--text);
@@ -105,6 +105,7 @@
     button:hover { border-color: var(--accent); }
     button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
     button.ghost { color: var(--muted); }
+    #disconnect-ms { width: 9rem; cursor: text; }
 
     #recall .caption .text { font-style: normal; color: var(--text); }
     #recall:empty::after { content: "Nothing finalized in this window yet."; color: var(--muted); font-style: italic; }
@@ -143,6 +144,8 @@
   <section>
     <h2>Connection</h2>
     <div class="controls">
+      <label for="disconnect-ms">Disconnect duration (ms)</label>
+      <input id="disconnect-ms" type="number" min="1"q" max="2147483647" step="1" value="5000" required>
       <button id="drop" class="ghost">Simulate disconnect</button>
     </div>
     <div id="stats"></div>
