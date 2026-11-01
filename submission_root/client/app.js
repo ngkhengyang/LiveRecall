@@ -346,7 +346,10 @@
       var update = updates[i];
       if (typeof update.segment !== "number") continue;
       if (this.state.accept(update)) {
-        this.view.renderCaption(this.state.segments.get(update.segment));
+        // Acceptance advances the resume cursor even if age pruning removes
+        // this caption immediately. Keep processing the rest of the batch.
+        var caption = this.state.segments.get(update.segment);
+        if (caption) this.view.renderCaption(caption);
         if (recovered) this.view.stats.recovered += 1;
         changed = true;
       }
