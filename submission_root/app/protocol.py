@@ -13,6 +13,7 @@ badly formed frame can never take the server down.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,7 +28,11 @@ def _as_int(value: Any) -> int | None:
 def _as_number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 @dataclass(frozen=True)
@@ -84,6 +89,7 @@ class ClientHello:
             last_revision = 0
         if history_seconds is None or history_seconds < 0:
             history_seconds = 30.0
+        history_seconds = min(history_seconds, 60.0)
 
         return cls(
             client_id=client_id,
@@ -135,20 +141,20 @@ class CaptionUpdate:
         source_ts = _as_number(raw.get("source_ts"))
         final = raw.get("final")
         text = raw.get("text")
-        session = raw.get("session", "L1")
+        session = raw.get("session")
 
         if segment is None or segment <= 0:
             return None
         if revision is None or revision <= 0:
             return None
-        if source_ts is None:
+        if source_ts is None or source_ts < 0:
             return None
         if not isinstance(final, bool):
             return None
         if not isinstance(text, str):
             return None
         if not isinstance(session, str) or not session:
-            session = "L1"
+            return None
 
         return cls(
             session=session,

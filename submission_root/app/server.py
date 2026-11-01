@@ -31,6 +31,7 @@ class Server:
         self._port = port
         self._store = CaptionStore()
         self._clients: set[Client] = set()
+        self._source_connected = False
 
     # -- lifecycle ------------------------------------------------------
 
@@ -53,7 +54,12 @@ class Server:
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=self.HELLO_TIMEOUT_SECONDS)
             payload = json.loads(raw)
-        except (asyncio.TimeoutError, json.JSONDecodeError, ConnectionClosed):
+        except (
+            asyncio.TimeoutError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ConnectionClosed,
+        ):
             await ws.close(self.BAD_HELLO, "Expected a valid hello message")
             return
 
@@ -70,7 +76,16 @@ class Server:
             if hello is None:
                 await ws.close(self.BAD_HELLO, "Malformed SOURCE_HELLO")
                 return
-            await Source(ws, hello, self).run()
+            if self._source_connected:
+                await ws.close(
+                    self.BAD_HELLO, "Only one active caption source is supported"
+                )
+                return
+            self._source_connected = True
+            try:
+                await Source(ws, hello, self).run()
+            finally:
+                self._source_connected = False
         elif kind == "CLIENT_HELLO":
             client_hello = ClientHello.from_dict(payload)
             if client_hello is None:
@@ -95,9 +110,9 @@ class Server:
     # -- caption flow ---------------------------------------------------
 
     def compute_history(
-        self, last_segment: int, last_revision: int
+        self, last_segment: int, last_revision: int, history_seconds: float = 60.0
     ) -> list[CaptionUpdate]:
-        return self._store.compute_history(last_segment, last_revision)
+        return self._store.compute_history(last_segment, last_revision, history_seconds)
 
     def ingest_caption_update(self, update: CaptionUpdate) -> None:
         """Called by ``Source``. Broadcasts only genuinely new state."""
