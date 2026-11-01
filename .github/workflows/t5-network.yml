@@ -1,0 +1,138 @@
+name: T5 network impairment
+
+# T5 needs tc/netem, which needs a real Linux kernel and root. WSL has neither
+# (sch_netem is not built for the WSL kernel), so this runs the impairment
+# matrix on a GitHub-hosted Ubuntu VM instead.
+#
+# Manual trigger only: a full matrix takes ~15 minutes and there is no reason
+# to run it on every push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      clients:
+        description: "Simulated clients per run"
+        default: "100"
+      duration:
+        description: "Seconds per run"
+        default: "40"
+      runs:
+        description: "Independent runs per arm (the spec requires 3 for reported results)"
+        default: "3"
+      profiles:
+        description: "Space-separated network_profiles/*.sh names, without .sh"
+        default: "delay_loss loss_3pct delay_100ms bandwidth_2mbit reorder"
+
+jobs:
+  t5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2
+          python -m pip install --upgrade pip
+          pip install -r submission_root/requirements.txt
+
+      - name: Enable netem
+        run: |
+          set -euo pipefail
+          if ! sudo modprobe sch_netem 2>/dev/null; then
+            echo "sch_netem not loaded; trying linux-modules-extra"
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+            sudo modprobe sch_netem
+          fi
+          # Smoke test on the interface the experiment actually uses, so the
+          # job fails here with a clear message rather than silently producing
+          # unimpaired numbers labelled as impaired.
+          sudo tc qdisc add dev lo root netem delay 1ms
+          sudo tc qdisc show dev lo
+          sudo tc qdisc del dev lo root
+          echo "netem is usable on lo"
+
+      - name: Record environment
+        run: |
+          {
+            echo "## Environment"
+            echo
+            echo '```'
+            echo "kernel:  $(uname -r)"
+            echo "cpus:    $(nproc)"
+            echo "memory:  $(free -h | awk '/^Mem:/{print $2}')"
+            echo "python:  $(python -V)"
+            tc -V
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The control arm MUST run on this same runner. Absolute numbers from a
+      # shared CI VM are not comparable to a laptop VM, so the impaired results
+      # are only meaningful against an unimpaired baseline measured here.
+      # Inputs are passed through env rather than interpolated into the shell,
+      # so a crafted input cannot inject commands into the run step.
+      - name: Baseline (no impairment)
+        env:
+          CLIENTS: ${{ inputs.clients }}
+          DURATION: ${{ inputs.duration }}
+          RUNS: ${{ inputs.runs }}
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          python test/run_demo.py \
+            --clients "$CLIENTS" \
+            --duration "$DURATION" \
+            --runs "$RUNS" \
+            --quiet-server \
+            --output-stem output/t5_baseline
+
+      - name: Impairment matrix
+        env:
+          CLIENTS: ${{ inputs.clients }}
+          DURATION: ${{ inputs.duration }}
+          RUNS: ${{ inputs.runs }}
+          PROFILES: ${{ inputs.profiles }}
+        run: |
+          set -uo pipefail
+          chmod +x network_profiles/*.sh
+          for profile in $PROFILES; do
+            script="network_profiles/${profile}.sh"
+            if [ ! -f "$script" ]; then
+              echo "::warning::no such profile: $script"
+              continue
+            fi
+            echo "::group::$profile"
+            sudo "./$script" lo
+            sudo tc qdisc show dev lo
+            python test/run_demo.py \
+              --clients "$CLIENTS" \
+              --duration "$DURATION" \
+              --runs "$RUNS" \
+              --quiet-server \
+              --output-stem "output/t5_$profile" || echo "::warning::$profile run failed"
+            sudo ./network_profiles/reset.sh lo
+            echo "::endgroup::"
+          done
+
+      - name: Summarise results
+        if: always()
+        run: python tools/summarise_t5.py >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t5-results
+          path: |
+            output/*.json
+            output/*.csv
+
+      - name: Always reset the qdisc
+        if: always()
+        run: sudo ./network_profiles/reset.sh lo || true

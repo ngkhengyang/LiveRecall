@@ -1,0 +1,99 @@
+name: Experiments
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite: all, public, before_after, hidden"
+        default: "all"
+      only:
+        description: "Comma-separated scenario prefixes (empty means all)"
+        default: ""
+      runs:
+        description: "Independent runs per arm"
+        default: "3"
+      quick:
+        description: "Use smaller smoke workloads"
+        default: "false"
+      tc_only:
+        description: "Run only scenarios requiring tc/netem"
+        default: "true"
+
+jobs:
+  experiments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2
+          python -m pip install --upgrade pip
+          pip install -r submission_root/requirements.txt
+          chmod +x network_profiles/*.sh
+
+      - name: Enable netem
+        run: |
+          set -euo pipefail
+          if ! sudo modprobe sch_netem 2>/dev/null; then
+            echo "sch_netem not loaded; trying linux-modules-extra"
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+            sudo modprobe sch_netem
+          fi
+          # Smoke test on the interface the experiment actually uses, so the
+          # job fails here with a clear message rather than silently producing
+          # unimpaired numbers labelled as impaired.
+          sudo tc qdisc add dev lo root netem delay 1ms
+          sudo tc qdisc show dev lo
+          sudo tc qdisc del dev lo root
+          echo "netem is usable on lo"
+
+      - name: Record environment
+        run: |
+          {
+            echo "## Environment"
+            echo
+            echo '```'
+            echo "kernel:  $(uname -r)"
+            echo "cpus:    $(nproc)"
+            echo "memory:  $(free -h | awk '/^Mem:/{print $2}')"
+            echo "python:  $(python -V)"
+            tc -V
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run experiments
+        continue-on-error: true
+        env:
+          SUITE: ${{ inputs.suite }}
+          ONLY: ${{ inputs.only }}
+          RUNS: ${{ inputs.runs }}
+          QUICK: ${{ inputs.quick }}
+          TC_ONLY: ${{ inputs.tc_only }}
+        run: |
+          set -euo pipefail
+          args=(--suite "$SUITE" --only "$ONLY" --runs "$RUNS")
+          if [[ "$QUICK" == "true" ]]; then args+=(--quick); fi
+          if [[ "$TC_ONLY" == "true" ]]; then args+=(--tc-only); fi
+          python experiments/run_matrix.py "${args[@]}"
+
+      - name: Summarise results
+        if: always()
+        run: python experiments/report.py >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: experiments-results
+          path: output/experiments
+
+      - name: Always reset the qdisc
+        if: always()
+        run: sudo ./network_profiles/reset.sh lo || true

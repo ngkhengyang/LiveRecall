@@ -16,7 +16,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from .caption_store import CaptionStore
-from .client import Client
+from .client import ABLATIONS, Client
 from .protocol import CaptionUpdate, ClientHello, SourceHello
 from .source import Source
 
@@ -35,6 +35,8 @@ class Server:
     # -- lifecycle ------------------------------------------------------
 
     async def run(self) -> None:
+        if ABLATIONS:
+            print(f"LiveRecall ablations: {','.join(sorted(ABLATIONS))}", flush=True)
         async with websockets.serve(
             self._accept,
             self._host,

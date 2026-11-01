@@ -3,7 +3,9 @@ SHELL := /bin/bash
 .PHONY: install check check-final \
 	demo-basic demo-server demo-report demo-browser demo-caption \
 	t1-basic t2-scale t3-slow t3-monitor t4-reconnect \
-	t5-network t5-network-enable t5-network-reset
+	t5-network t5-network-enable t5-network-reset \
+	exp-list exp-quick exp-public exp-hidden exp-before-after exp-all \
+	exp-tc exp-edge exp-report
 
 
 # START_HERE.md
@@ -77,3 +79,51 @@ demo-browser:
 # Stream deterministic captions for the long browser demonstration.
 demo-caption:
 	./venv/bin/python test/caption_source.py --duration 120
+
+
+# experiments/README.md
+# Override on the command line, e.g. `make exp-hidden RUNS=1 ONLY=H2,H4`.
+RUNS ?= 3
+ONLY ?=
+EXP_OUT ?= output/experiments
+EXP = ./venv/bin/python experiments/run_matrix.py --out $(EXP_OUT) --runs $(RUNS) $(if $(ONLY),--only $(ONLY))
+
+# List every scenario and scenario/arm case.
+exp-list:
+	./venv/bin/python experiments/run_matrix.py --list
+
+# Smoke test of all suites: shortened workloads, one run, no tc.
+exp-quick:
+	$(EXP) --suite all --no-tc --quick --runs 1
+	$(MAKE) exp-report
+
+# Suites without tc (safe on WSL): full local workloads.
+exp-public:
+	$(EXP) --suite public --no-tc
+	$(MAKE) exp-report
+
+exp-hidden:
+	$(EXP) --suite hidden --no-tc
+	$(MAKE) exp-report
+
+exp-before-after:
+	$(EXP) --suite before_after --no-tc
+	$(MAKE) exp-report
+
+exp-all:
+	$(EXP) --suite all --no-tc
+	$(MAKE) exp-report
+
+# Only netem/tbf scenarios. Needs passwordless sudo and the sch_netem module.
+exp-tc:
+	sudo modprobe sch_netem
+	$(EXP) --suite all --tc-only
+	$(MAKE) exp-report
+
+# H10 protocol invariants only.
+exp-edge:
+	$(EXP) --suite hidden --only H10 --runs 1
+
+# Regenerate SUMMARY.md and summary.csv from stored results.
+exp-report:
+	./venv/bin/python experiments/report.py --out $(EXP_OUT)

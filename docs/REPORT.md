@@ -43,7 +43,7 @@ Use the supplied harness without changing its measurement logic. Run each requir
 
 ### 4.2 Measured results
 
-Caption Age is client receive time minus `source_ts`; it excludes browser rendering delay. Final completeness measures correctly received unique finals against generated finals. 
+Caption Age is client receive time minus `source_ts`; it excludes browser rendering delay. Final completeness measures correctly received unique finals against generated finals.
 
 | Test / client group | P50 age (ms) | P95 age (ms) | P99 age (ms) | Final completeness (%) |
 |---|---:|---:|---:|---:|
@@ -77,7 +77,7 @@ TODO: Select at least one public stress test and compare the final design with a
 | TODO: final completeness | TODO | TODO | TODO |
 | TODO: coverage or resource metric | TODO | TODO | TODO |
 
-TODO: Explain the mechanism behind the measured difference and its cost. Quantify the improvement or regression without sacrificing correctness or concealing reduced coverage. 
+TODO: Explain the mechanism behind the measured difference and its cost. Quantify the improvement or regression without sacrificing correctness or concealing reduced coverage.
 
 ## 6. Discussion, limitations and future work
 
@@ -91,7 +91,7 @@ TODO: Give a short, concrete future-work/FYP direction and explain how it builds
 
 
 
-## Appendices 
+## Appendices
 
 ## Draft completion checklist (remove before export)
 

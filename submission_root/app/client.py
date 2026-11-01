@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from typing import TYPE_CHECKING
 
 from websockets.exceptions import ConnectionClosed
@@ -44,6 +45,13 @@ from .protocol import CaptionUpdate, ClientHello, History
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
     from .server import Server
+
+# Experiment-only switch, default off.
+ABLATIONS = frozenset(
+    filter(
+        None, (v.strip() for v in os.environ.get("LIVERECALL_ABLATE", "").split(","))
+    )
+)
 
 
 class Client:
@@ -84,7 +92,7 @@ class Client:
     # it. The deterministic source finalizes a segment in about 0.4 s, so the
     # revision is normally replaced in place by its own final and one message
     # carries what three would have.
-    PROVISIONAL_GRACE_SECONDS = 1.0
+    PROVISIONAL_GRACE_SECONDS = 0.0 if ABLATIONS & {"grace", "all"} else 1.0
 
     def __init__(self, ws, hello: ClientHello, server: "Server") -> None:
         self.ws = ws
@@ -107,7 +115,10 @@ class Client:
     @property
     def _catchup(self) -> bool:
         """True while a recently overdue pong still governs this client."""
-        return asyncio.get_running_loop().time() < self._catchup_until
+        return (
+            not ABLATIONS & {"probe", "all"}
+            and asyncio.get_running_loop().time() < self._catchup_until
+        )
 
     async def run(self) -> None:
         # Step order here is load-bearing; see the note at the end of this
@@ -262,15 +273,18 @@ class Client:
                             ),
                         )
                     except asyncio.TimeoutError:
-                        print(
-                            f"client resync: id={self.hello.client_id}; "
-                            "reader stalled, closing for history catch-up",
-                            flush=True,
-                        )
-                        await self.ws.close(
-                            self.TOO_FAR_BEHIND, "resynchronize via history"
-                        )
-                        return
+                        if ABLATIONS & {"resync", "all"}:
+                            await pong
+                        else:
+                            print(
+                                f"client resync: id={self.hello.client_id}; "
+                                "reader stalled, closing for history catch-up",
+                                flush=True,
+                            )
+                            await self.ws.close(
+                                self.TOO_FAR_BEHIND, "resynchronize via history"
+                            )
+                            return
                 self._probe_tick.set()
                 self._wake.set()
                 await asyncio.sleep(self.PROBE_INTERVAL_SECONDS)
