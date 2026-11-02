@@ -107,6 +107,9 @@
     button.ghost { color: var(--muted); }
     #disconnect-ms { width: 9rem; cursor: text; }
 
+    #recall-section { max-height: 40rem; display: flex; flex-direction: column; }
+    #recall-section > h2, #recall-section > .controls, #recall-section > .hint { flex-shrink: 0; }
+    #recall { min-height: 0; overflow-y: auto; }
     #recall .caption .text { font-style: normal; color: var(--text); }
     #recall:empty::after { content: "Nothing finalized in this window yet."; color: var(--muted); font-style: italic; }
     .recall-time { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; min-width: 3.5rem; }
@@ -129,7 +132,7 @@
     <p class="hint">A provisional caption is replaced in place by each newer revision of the same segment; it is never shown twice.</p>
   </section>
 
-  <section>
+  <section id="recall-section">
     <h2>What did I miss?</h2>
     <div class="controls">
       <button data-seconds="15" aria-pressed="false">15 s</button>
