@@ -209,10 +209,13 @@
     }
   };
 
-  View.prototype.scrollToLatest = function () {
+  View.prototype.isFollowingLatest = function () {
     var el = this.liveEl;
-    var nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  };
+
+  View.prototype.scrollToLatest = function () {
+    this.liveEl.scrollTop = this.liveEl.scrollHeight;
   };
 
   View.prototype.renderRecall = function () {
@@ -266,6 +269,7 @@
     this.ws = null;
     this.retries = 0;
     this.timer = null;
+    this.reconnectNotBefore = 0;
     this.manualClose = false;
   }
 
@@ -341,19 +345,24 @@
   };
 
   Connection.prototype.applyUpdates = function (updates, recovered) {
+    // Measure before rendering: a large batch can move the bottom far away.
+    var followingLatest = this.view.isFollowingLatest();
     var changed = false;
     for (var i = 0; i < updates.length; i++) {
       var update = updates[i];
       if (typeof update.segment !== "number") continue;
       if (this.state.accept(update)) {
-        this.view.renderCaption(this.state.segments.get(update.segment));
+        // Acceptance advances the resume cursor even if age pruning removes
+        // this caption immediately. Keep processing the rest of the batch.
+        var caption = this.state.segments.get(update.segment);
+        if (caption) this.view.renderCaption(caption);
         if (recovered) this.view.stats.recovered += 1;
         changed = true;
       }
     }
     if (changed) {
       this.view.trimRows();
-      this.view.scrollToLatest();
+      if (followingLatest) this.view.scrollToLatest();
       this.view.renderRecall();
     }
     this.view.renderStats();
@@ -365,6 +374,7 @@
       RECONNECT_MAX_MS,
       RECONNECT_BASE_MS * Math.pow(2, this.retries)
     );
+    delay = Math.max(delay, this.reconnectNotBefore - Date.now());
     this.retries += 1;
     var seconds = (delay / 1000).toFixed(1);
     this.view.setStatus("reconnecting in " + seconds + "s", "connecting");
@@ -374,8 +384,9 @@
     }, delay);
   };
 
-  Connection.prototype.dropNow = function () {
+  Connection.prototype.dropNow = function (durationMs) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.reconnectNotBefore = Date.now() + durationMs;
       this.view.setStatus("disconnected (simulated)", "offline");
       this.ws.close();
     }
@@ -406,8 +417,10 @@
   document.getElementById("refresh").addEventListener("click", function () {
     view.renderRecall();
   });
+  var disconnectMs = document.getElementById("disconnect-ms");
   document.getElementById("drop").addEventListener("click", function () {
-    connection.dropNow();
+    if (!disconnectMs.reportValidity()) return;
+    connection.dropNow(disconnectMs.valueAsNumber);
   });
 
   // Ages shown in the recall list drift as time passes even with no traffic.
