@@ -176,45 +176,44 @@ send; it never sends anything itself. Takes an injectable `clock` so the grace-w
 behavior below is testable without real time passing.
 
 **Attributes**
-- `self._pending: dict[int, CaptionUpdate]` — keyed by segment, insertion-ordered.
-- `self._queued_at: dict[int, float]` — when each segment first entered the buffer.
-- `MAX_PENDING_SEGMENTS = 256` — the explicit bound backing "boundedness is part of
-  correctness".
+- `self._pending: dict[int, CaptionUpdate]` — keyed by an increasing queue ID,
+  insertion-ordered. Multiple revisions of one segment coexist in normal mode.
+- `self._queued_at: dict[int, float]` — the enqueue time for each queue ID.
+- `self._by_segment: dict[int, int]` — segment-to-queue-ID index used only while
+  coalescing; each segment then has exactly one pending entry.
+- `MAX_PENDING_UPDATES = 256` — soft backlog threshold activating compaction and
+  catch-up batching until the queue drains.
+- Hard bounds: 4096 pending finals, 4000 active segments and 4 MiB pending JSON.
 - `self._should_close`, exposed as the public read-only `should_close` property.
 
 **Public methods**
-- `offer(update)` — `self._pending[update.segment] = update`, then enforce the bound.
-- `has_pending()`, and the `pending` / `coalesced` / `dropped` counters (printed on
-  disconnect; they are how we observed the behavior described below).
+- `set_overloaded(bool)` — applies the client's lag verdict, compacting an existing
+  backlog when lag starts. When lag clears, new revisions are preserved individually
+  unless queue pressure remains active.
+- `offer(update)` — append every revision normally; replace a superseded revision
+  only during overload. Check hard limits after any pressure-triggered compaction.
+- `has_pending()`, and the `pending` / `pending_bytes` / `coalesced` / `rejected`
+  counters (coalesced/rejected counts are printed on disconnect).
 - `next_update(prefer_final=False, provisional_grace=0.0) -> CaptionUpdate | None` —
   see "Slow readers" for why the two arguments exist.
 
 **Private helper**
-- `_enforce_bound()` — evict the oldest **non-final** entry. If every pending entry is
-  already final, do **not** drop a final to make room — set `_should_close` instead,
-  forcing a reconnect that re-syncs through `compute_history`.
+- `_compact()` — discard only superseded provisional revisions, retaining each
+  segment's final or newest active revision at its original position and enqueue age.
 
-**Why `dict[int, CaptionUpdate]` is the right shape** (over a list+index-map or
-`asyncio.Queue`):
-- Python dicts preserve insertion order, and **re-assigning an existing key does not move
-  its position**. So `offer()` simultaneously (a) coalesces a superseded provisional for a
-  segment already queued, (b) preserves its original arrival-order slot for FIFO draining,
-  and (c) needs no separate cleanup/index bookkeeping.
-- It never needs to compare revision numbers — `CaptionStore` has already validated
-  monotonicity and final-durability before anything reaches `offer()`, so an
-  unconditional overwrite is always correct.
-- Coalescing is **emergent, not heuristic**: when the client is keeping up, each entry is
-  drained before the next revision for that segment arrives, so every revision is
-  delivered individually and Normal Update Coverage stays at 100%. There is no "is this
-  client slow" branch *inside this class* to get wrong.
-- Finals are never silently dropped: once an entry is final, nothing ever writes that key
-  again, so it just waits its turn.
-
-**Changed during implementation — `offer()` stops accepting work after `should_close`.**
-Originally the bound was only enforced inside `_enforce_bound`, so once the close flag
-was set the dict kept growing while the sender task was still blocked. Unit test: with
-`MAX_PENDING_SEGMENTS = 3` and 200 offered finals, `pending` settled at 4 rather than
-climbing. Everything dropped there is durable in the server's history.
+**Why the normal and overload paths differ**:
+- Normal arrivals get distinct queue IDs, so a fast burst cannot overwrite unsent
+  revisions before the sender runs. Global arrival order is preserved.
+- During overload, the segment index allows replacement in constant time without
+  moving the retained queue slot or restarting its provisional grace period.
+- `CaptionStore` validates revision monotonicity and final durability before enqueue,
+  so compaction can retain the last accepted state of each segment safely.
+- Once a pressure backlog drains and client lag clears, normal full-update delivery
+  resumes automatically. Only finals are eligible for catch-up batches.
+- Hard overflow requests explicit closure instead of evicting a final or the latest
+  active state. Subsequent offers are rejected while the sender closes. Recovery is
+  limited to the requested recent-history window; it cannot guarantee arbitrarily
+  old unsent finals after closure.
 
 ## `Server`
 

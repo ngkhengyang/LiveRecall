@@ -185,6 +185,7 @@ class Client:
         Called from ``Server.broadcast``. It only mutates in-memory buffer
         state, so a stalled reader here cannot delay any other client.
         """
+        self._buffer.set_overloaded(self._catchup)
         self._buffer.offer(update)
         self._wake.set()
 
@@ -236,6 +237,9 @@ class Client:
 
     def _next_delivery(self) -> CaptionUpdate | History | None:
         """Batch unsent finals only during catch-up or actual queue pressure."""
+        # Lag can change while updates are already queued. Compact that backlog
+        # on entry to catch-up, and preserve new revisions once lag clears.
+        self._buffer.set_overloaded(self._catchup)
         catching_up = self._catchup or self._buffer.pressured
         if catching_up:
             # Continuing final batches must not starve active segments.
