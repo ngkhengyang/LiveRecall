@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from websockets.exceptions import ConnectionClosed
+
 from .protocol import CaptionUpdate, SourceDone, SourceHello
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
@@ -34,7 +36,7 @@ class Source:
             async for raw in self.ws:
                 try:
                     payload = json.loads(raw)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     # Malformed JSON must never take the server down.
                     continue
                 if not isinstance(payload, dict):
@@ -43,7 +45,7 @@ class Source:
                 kind = payload.get("type")
                 if kind == "CAPTION_UPDATE":
                     update = CaptionUpdate.from_dict(payload)
-                    if update is not None:
+                    if update is not None and update.session == self.hello.session:
                         self.server.ingest_caption_update(update)
                 elif kind == "SOURCE_DONE":
                     done = SourceDone.from_dict(payload)
@@ -55,5 +57,7 @@ class Source:
                     # Forward compatibility: ignore message types and extra
                     # fields this server does not know about.
                     continue
+        except ConnectionClosed:
+            pass
         finally:
             print("source disconnected", flush=True)

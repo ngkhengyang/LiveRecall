@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 from typing import TYPE_CHECKING
 
 from websockets.exceptions import ConnectionClosed
@@ -45,13 +44,6 @@ from .protocol import CaptionUpdate, ClientHello, History
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
     from .server import Server
-
-# Experiment-only switch, default off.
-ABLATIONS = frozenset(
-    filter(
-        None, (v.strip() for v in os.environ.get("LIVERECALL_ABLATE", "").split(","))
-    )
-)
 
 
 class Client:
@@ -92,7 +84,8 @@ class Client:
     # it. The deterministic source finalizes a segment in about 0.4 s, so the
     # revision is normally replaced in place by its own final and one message
     # carries what three would have.
-    PROVISIONAL_GRACE_SECONDS = 0.0 if ABLATIONS & {"grace", "all"} else 1.0
+    PROVISIONAL_GRACE_SECONDS = 1.0
+    MAX_FINAL_BATCHES_BEFORE_ACTIVE = 4
 
     def __init__(self, ws, hello: ClientHello, server: "Server") -> None:
         self.ws = ws
@@ -104,6 +97,10 @@ class Client:
         self._catchup_until = 0.0
         self._rtt = 0.0
         self._held = 0
+        self._batches_sent = 0
+        self._batched_finals = 0
+        self._final_batches_since_active = 0
+        self._in_flight: CaptionUpdate | History | None = None
         self._tasks: list[asyncio.Task] = []
 
     def _behind_threshold(self) -> float:
@@ -115,10 +112,7 @@ class Client:
     @property
     def _catchup(self) -> bool:
         """True while a recently overdue pong still governs this client."""
-        return (
-            not ABLATIONS & {"probe", "all"}
-            and asyncio.get_running_loop().time() < self._catchup_until
-        )
+        return asyncio.get_running_loop().time() < self._catchup_until
 
     async def run(self) -> None:
         # Step order here is load-bearing; see the note at the end of this
@@ -126,7 +120,9 @@ class Client:
         # await in between.
         self.server.register_client(self)
         items = self.server.compute_history(
-            self.hello.last_segment, self.hello.last_revision
+            self.hello.last_segment,
+            self.hello.last_revision,
+            self.hello.history_seconds,
         )
         print(
             f"client connected: id={self.hello.client_id}; "
@@ -159,8 +155,9 @@ class Client:
             self.server.unregister_client(self)
             print(
                 f"client disconnected: id={self.hello.client_id}; "
-                f"coalesced={self._buffer.coalesced}; dropped={self._buffer.dropped}; "
-                f"held={self._held}; clients={self.server.client_count}",
+                f"coalesced={self._buffer.coalesced}; rejected={self._buffer.rejected}; "
+                f"held={self._held}; batches={self._batches_sent}; "
+                f"batched_finals={self._batched_finals}; clients={self.server.client_count}",
                 flush=True,
             )
 
@@ -214,22 +211,50 @@ class Client:
                         await self._hold()
                         if self._buffer.should_close or not self._buffer.has_pending():
                             break
-                    update = self._buffer.next_update(
-                        prefer_final=self._catchup,
-                        provisional_grace=self.PROVISIONAL_GRACE_SECONDS,
-                    )
-                    if update is None:
+                    delivery = self._next_delivery()
+                    if delivery is None:
                         # Only a still-fresh provisional is waiting. Leave it
                         # to be superseded; the probe loop re-wakes us so it
                         # still goes out once it ages past the grace.
                         break
-                    await self.ws.send(update.to_json())
+                    # Dequeue transfers ownership to this in-flight message;
+                    # completing send is not an application-level client ACK.
+                    self._in_flight = delivery
+                    await self.ws.send(delivery.to_json())
+                    self._in_flight = None
+                    if isinstance(delivery, History):
+                        self._batches_sent += 1
+                        self._batched_finals += len(delivery.items)
 
                 if self._buffer.should_close:
-                    await self.ws.close(self.TOO_FAR_BEHIND, "client too far behind")
+                    await self.ws.close(
+                        self.TOO_FAR_BEHIND, "pending delivery capacity exhausted"
+                    )
                     return
         except ConnectionClosed:
             return
+
+    def _next_delivery(self) -> CaptionUpdate | History | None:
+        """Batch unsent finals only during catch-up or actual queue pressure."""
+        catching_up = self._catchup or self._buffer.pressured
+        if catching_up:
+            # Continuing final batches must not starve active segments.
+            if self._final_batches_since_active >= self.MAX_FINAL_BATCHES_BEFORE_ACTIVE:
+                active = self._buffer.take_active_update(self.PROVISIONAL_GRACE_SECONDS)
+                if active is not None:
+                    self._final_batches_since_active = 0
+                    return active
+            items = self._buffer.take_final_batch()
+            if items:
+                self._final_batches_since_active += 1
+                return History(items)
+        delivery = self._buffer.next_update(
+            prefer_final=catching_up,
+            provisional_grace=self.PROVISIONAL_GRACE_SECONDS,
+        )
+        if delivery is not None and not delivery.final:
+            self._final_batches_since_active = 0
+        return delivery
 
     async def _hold(self) -> None:
         """Wait for the next completed probe, or ``MAX_HOLD_SECONDS``."""
@@ -273,18 +298,15 @@ class Client:
                             ),
                         )
                     except asyncio.TimeoutError:
-                        if ABLATIONS & {"resync", "all"}:
-                            await pong
-                        else:
-                            print(
-                                f"client resync: id={self.hello.client_id}; "
-                                "reader stalled, closing for history catch-up",
-                                flush=True,
-                            )
-                            await self.ws.close(
-                                self.TOO_FAR_BEHIND, "resynchronize via history"
-                            )
-                            return
+                        print(
+                            f"client resync: id={self.hello.client_id}; "
+                            "reader stalled, closing for history catch-up",
+                            flush=True,
+                        )
+                        await self.ws.close(
+                            self.TOO_FAR_BEHIND, "resynchronize via history"
+                        )
+                        return
                 self._probe_tick.set()
                 self._wake.set()
                 await asyncio.sleep(self.PROBE_INTERVAL_SECONDS)

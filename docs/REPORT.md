@@ -4,26 +4,116 @@ Team: TODO | Members: TODO | Implementation commit: TODO
 
 ## 1. Architecture and protocol
 
-TODO: Introduce the classroom problem and the design goals: correct revision state, fresh captions, bounded resource usage and useful recovery.
+LiveRecall distributes a revision-based caption stream from the supplied
+`test/caption_source.py` to student browsers over WebSockets. The design separates
+protocol parsing, authoritative caption state, and independent per-client delivery.
 
+```text
+caption_source.py -> Source -> Server -> CaptionStore
+                                | accepted updates
+                                v
+                   per-client OutboundBuffer -> sender -> browser
+```
+
+`submission_root/solution_server.py` calls `Server.main()` and preserves the
+required `python solution_server.py --port <port>` interface. The asyncio server
+defaults to `0.0.0.0:8765`. `app/server.py` owns one `CaptionStore`, the client
+registry, and the one-active-source flag. `app/source.py` handles producer input;
+`app/client.py` manages each student's history response, sender, lag probes, and
+cleanup. `app/outbound_buffer.py` stores pending updates without sending them.
+`client/app.js` manages browser revision state, local recall, and reconnects;
+`client/index.html` provides the caption and recall interface.
+
+The first message selects the connection role: `SOURCE_HELLO` identifies a
+producer and `CLIENT_HELLO` identifies a student. A missing or invalid hello is
+refused after at most five seconds, using close code 1008. The required workload
+uses one session and one active source; a second simultaneous source is refused.
+Caption updates must match the session declared in `SOURCE_HELLO`.
+
+`app/protocol.py` validates caption fields: positive integer segment/revision IDs,
+a finite nonnegative Unix-epoch `source_ts`, a Boolean `final`, string `text`, and
+a nonempty session. It ignores extra fields; the source handler skips malformed
+updates and unknown message types. The server accepts arbitrary increasing
+revision numbers. The supplied producer completes each segment before starting
+the next. `SOURCE_DONE` marks the end of a test stream; the server does not relay
+it to clients.
+
+Accepted updates pass through `CaptionStore` before broadcast. Ingestion and
+per-client enqueueing contain no socket sends or `await`; each client has its own
+sender task, so a blocked send does not directly block other senders. Fan-out
+still costs work proportional to client count. Immutable caption objects cache
+their serialized JSON for reuse. `CLIENT_HELLO` reports a finalized cursor and
+requests up to 60 seconds of context; `HISTORY` precedes live updates. A source
+disconnect retains server state. Starting a new lecture requires a server restart
+and browser reload because segment IDs share one store.
 
 ## 2. Revision and recovery semantics
 
-TODO: Explain and justify the implementation rules for:
+`CaptionStore.validate_and_apply()` keeps one winning update per segment. An
+update must increase the held revision; duplicates and stale revisions are
+rejected before broadcast. Once final, a segment rejects all further updates,
+including higher revisions. Each final therefore enters history once. A retirement
+watermark rejects reclaimed segment IDs, relying on the source's increasing IDs.
 
-- Replacing a segment with a newer revision, rejecting stale/duplicate updates and preserving final state.
-- Bounding server history while supporting up to 60 seconds of recent recovery; state the actual time/item bounds and their limitations.
-- Late join and reconnect: selecting missing finals from the client's finalized cursor, ordering recovery before live delivery and preventing duplicate finals or gaps.
-- Browser state: distinguishing provisional/final captions, retaining at least 60 seconds of finalized history and providing local 15/30/60-second recall with a 30-second default.
+The server retains finalized captions for 90 seconds after accepting them, using
+a monotonic clock to measure elapsed time. Expired entries are removed when
+processing new updates or recovery requests, including requests made after the
+source stops. Recovery returns only missed finals within the client's requested
+window, up to 60 seconds; the additional retention time does not increase that
+window. The server also limits unfinished segments to 4,000, removing those with
+the smallest IDs if this limit is exceeded. Finalized captions have no count
+limit within the retention window, so memory usage depends on caption rate and
+text size rather than total lecture duration. Missed finals outside the requested
+recovery window cannot be recovered.
 
+`CLIENT_HELLO` carries the latest finalized `(last_segment, last_revision)`.
+Recovery returns only finals with a greater tuple, oldest first under the supplied
+sequential source. A late join uses `(0, 0)`. Registration and the history snapshot
+execute without an intervening `await`; subsequent arrivals enter the client's
+live buffer while `HISTORY` is sent. The sender starts afterwards, preventing a
+gap between snapshot and subscription or live delivery overtaking history.
+
+The browser applies live and recovered updates through the same revision gate
+and rewrites one row per segment, with distinct live/final badges. It retains
+finals for 150 seconds using `source_ts`, independently of the 80-row display
+limit, and caps unfinished state at 400 segments. Recall filters local finals
+to 15/30/60 seconds, defaulting to 30, without a server request. Automatic
+reconnect retries begin at 500 ms and double to five seconds; the browser sends
+its finalized cursor and requests 60 seconds. State survives disconnection in
+memory; reload becomes a late join. Browser recall assumes sufficiently aligned
+source/client wall clocks.
 
 ## 3. Backpressure and overload policy
 
-TODO: Explain the actual per-client buffer and transport-pressure handling, including numerical bounds and the signals that activate overload behavior.
+Each client has an independent sender and an `OutboundBuffer` keyed by segment.
+Replacing a pending entry coalesces superseded provisional revisions without
+changing its FIFO position. When the sender drains between revisions, every
+update is forwarded. A blocked socket stalls its own sender; broadcast only
+enqueues, preserving other clients' independent progress.
 
-TODO: State which provisional revisions may be discarded, how finals and the latest active state are preserved, and what happens if a client remains unable to keep up. Explain how normal clients remain independent and how full revision delivery resumes when pressure clears.
+`Client._probe_loop()` keeps one ping outstanding, pausing 250 ms after each
+completed probe. Timely pongs update a smoothed RTT estimate with weight 0.25.
+A pong overdue by `max(0.5 s, 6 * RTT)` activates catch-up for three seconds.
+Pong delay provides an indirect lag signal when socket buffers hide a slow
+reader; network delay can also trigger it. During catch-up, sending waits for
+the next completed probe or at most 0.5 seconds per hold. Finals take priority;
+provisional-only backlog waits until its oldest entry has been queued for one
+second, allowing newer revisions to replace it. After catch-up expires, ordinary
+FIFO delivery resumes without deliberate holds or provisional grace.
 
-TODO: Discuss catch-up after a temporary bottleneck and the limits of any disconnect/resynchronization policy. Distinguish what the design intends from what experiments demonstrate.
+The pending-segment target is 256. Overflow evicts the oldest pending provisional.
+If all 257 entries are final, the buffer stops accepting updates and requests
+closure with code 1013 instead of evicting a final. One in-flight send and
+WebSocket/TCP buffers lie outside this count; it is not a total byte bound.
+A pong still outstanding at `max(1.5 s, 18 * RTT)` also triggers closure.
+
+Reconnect requests recent finals through `HISTORY`, avoiding individual replay
+of obsolete revisions. Recovery remains limited to the requested window; closure
+does not guarantee every queued final is recoverable. Extreme overflow can also
+evict an active segment's only pending revision, so latest-active-state delivery
+is not guaranteed in that case. The policy aims for rapid convergence after
+temporary pressure, while sustained overload and lag-detection accuracy require
+the experiments in Section 4; implementation alone does not establish performance.
 
 ## 4. Public experiments and results
 
@@ -43,7 +133,13 @@ Use the supplied harness without changing its measurement logic. Run each requir
 
 ### 4.2 Measured results
 
-Caption Age is client receive time minus `source_ts`; it excludes browser rendering delay. Final completeness measures correctly received unique finals against generated finals.
+Caption Age is client receive time minus `source_ts`, excluding browser rendering;
+report its P50/P95/P99. Final completeness is correctly received unique finals /
+generated unique finals. Fresh Caption Ratio is the fraction of received updates
+within threshold T (public default: 500 ms); Fresh Final Caption Ratio uses generated
+finals as its denominator. Normal Update Coverage measures source revisions
+received during unconstrained operation. Recovery time runs from successful
+reconnect until all required recent recovery state has arrived.
 
 | Test / client group | P50 age (ms) | P95 age (ms) | P99 age (ms) | Final completeness (%) |
 |---|---:|---:|---:|---:|
@@ -63,7 +159,6 @@ Caption Age is client receive time minus `source_ts`; it excludes browser render
 | T4 | TODO | TODO | TODO |
 | T5 | TODO | TODO | TODO |
 
-TODO: Report duplicate/stale-state counts, reconnect recovery time, and evidence of bounded memory/buffering. Define the recovery-time measurement and identify which client group it covers. Add compact supporting figures/tables only where they clarify the findings.
 
 TODO: Interpret the results: correctness under T1, scaling under T2, normal-versus-slow isolation under T3, recovery under T4, and TCP retransmission/head-of-line effects on tail latency under T5. Explain unexpected observations and any failed runs.
 
@@ -89,13 +184,45 @@ TODO: Give a short, concrete future-work/FYP direction and explain how it builds
 
 ## References
 
-
+- CS3103 Assignment 4 specification, Sections 8-12 (experiments, metrics, environment, report requirements).
+- TODO: Cite external technical sources actually used.
 
 ## Appendices
 
+TODO: Put exact commands, per-run outputs, detailed configurations, and any code
+walkthrough here or link to repository evidence. Keep the required design,
+aggregate results, comparison, and analysis in the main 4-5 pages.
+
 ## Draft completion checklist (remove before export)
 
-- [ ] All required sections are supported by the submitted implementation and evidence.
+The assignment specifies **4-5 main pages, excluding references/appendices**;
+it does not prescribe font size or margins. Use a readable export (for example,
+A4, 11 pt text, 20 mm margins) and verify the rendered PDF after completing all
+TODOs. Do not add a separate cover page. The following budgets are drafting
+targets, not assignment rules; they include space for headings and tables.
+
+| Main section | Page allowance | Prose target |
+|---|---:|---:|
+| 1. Architecture and protocol | 0.90 | 350 words |
+| 2. Revision and recovery | 0.65 | 300 words |
+| 3. Backpressure and overload | 0.65 | 300 words |
+| 4. Experiments and results | 1.50 | 550 words plus the compact results tables |
+| 5. Optimization comparison | 0.55 | 225 words plus one comparison table |
+| 6. Discussion and future work | 0.50 | 175 words |
+| Total | 4.75 | About 1,900 words plus tables |
+
+Replace TODO instructions with final prose and measurements within these budgets.
+Keep architecture concise; a method-by-method walkthrough belongs in an appendix.
+Leave the remaining 0.25 page for the title, team line, and layout variation.
+An A4/11 pt/20 mm-margin layout projection expanded to these prose targets, with
+the existing tables, rendered to five main pages. This is a planning check;
+verify again after replacing placeholders and adding any figures. Replace a
+table with a figure where useful instead of continually adding material.
+
+- [ ] All required sections are supported by the submitted implementation and evidence; no TODOs remain.
+- [ ] Sections 2-3 explain actual rules, numeric bounds, and failure/recovery limits.
+- [ ] Results cover all required metrics, recovery time, isolation, and bounded resource usage.
+- [ ] The separate deterministic browser demo covers revision replacement, local recall, reconnect, and late join.
 - [ ] T1–T5 each have at least three independent runs; medians and units are clear.
 - [ ] At least one stress-test before/after comparison is quantified and reproducible.
 - [ ] The main report is 4–5 pages after PDF export, excluding references/appendices.

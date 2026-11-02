@@ -126,8 +126,9 @@ No `ws`, no `asyncio`, no `await` anywhere in this class. Constructed once by `S
 - `self._final_history: collections.deque[SegmentState]` — bounded, ordered
   oldest→newest; the recovery/HISTORY source.
 - `self._retired_before: int` — watermark; see boundedness below.
-- Class constants: `HISTORY_HORIZON_SECONDS = 90.0`, `HISTORY_MAX_ITEMS = 2000`,
-  `MAX_TRACKED_SEGMENTS = 4000`.
+- `self._active_segments: set[int]` — unfinished IDs only; finals are not subject
+  to this count backstop.
+- Class constants: `HISTORY_HORIZON_SECONDS = 90.0`, `MAX_ACTIVE_SEGMENTS = 4000`.
 
 **`SegmentState`** — *composed* from a `CaptionUpdate` rather than subclassing it:
 `@dataclass(frozen=True) class SegmentState: update: CaptionUpdate; received_at: float`,
@@ -142,23 +143,31 @@ with `segment`/`revision`/`final` convenience properties. Never leaves `CaptionS
      out-of-order in one rule);
   4. otherwise store, and if final append to `_final_history` and trim. Returns the
      update as the caller's confirmation that it was accepted.
-- `compute_history(last_segment, last_revision) -> list[CaptionUpdate]` — every entry
-  with `(segment, revision) > (last_segment, last_revision)`, oldest-first.
+- `compute_history(last_segment, last_revision, history_seconds=60) -> list[CaptionUpdate]`
+  — finalized entries after the cursor inside the requested window, oldest-first.
 
-**Decision: `history_seconds` is deliberately ignored.** The bounded window is already
-the cap, and a client can only be harmed by receiving fewer finals than it missed —
-anything it already holds is excluded by the tuple comparison. Serving the whole window
-costs a late joiner nothing and maximizes Final Caption Completeness, which is the hard
-correctness gate. Expect this as a viva question.
+**Corrected during region A review: honor `history_seconds`.** Client parsing clamps
+the requested window to 0--60 seconds, and the client handler forwards it to the store.
+The previous implementation returned the whole retained window, spending bandwidth
+on unrequested context. Recovery now filters by both cursor and elapsed time since
+server acceptance. Storage remains 90 seconds, but replies respect the requested
+window. History is trimmed on recovery and every update, including provisional
+updates, so an idle source cannot leave expired history in the next response.
+A zero-second request returns empty history; missing/invalid requests default to 30.
 
 **Changed during implementation — bounding `_segments`.** The original spec bounded
 `_final_history` but left `_segments` growing one entry per segment forever, which fails
 "boundedness is part of correctness" over a long lecture. `_trim_history` now also drops
 the evicted segment's `_segments` entry and advances `_retired_before`, so a pruned
 segment's stale revision can't be re-accepted once its state is reclaimed.
-`_trim_segments` is a second backstop for a source that opens segments without ever
-finalizing them — those never enter the history, so the time and item bounds alone would
-not reclaim them.
+`_trim_segments` caps only the unfinished IDs in `_active_segments`; those never
+enter final history and therefore need their own count backstop. Accepted finals
+leave the active set and remain until the 90-second history cutoff. The previous
+2,000-final and 4,000-total count caps could truncate a requested 60-second window
+under bursts, so they no longer evict finals. Final-state memory scales with
+caption volume in the fixed retention window, not with total lecture duration.
+The browser likewise expires finals after 150 seconds and caps only unfinished
+segments at 400; its 80-row live display limit does not truncate local recall.
 
 ## `OutboundBuffer` (pure logic — owned by each `Client`)
 
@@ -249,7 +258,7 @@ a `_wake` event, a `_probe_tick` event, and the catch-up state (`_catchup_until`
 
 **`async run(self)`**:
 1. `self.server.register_client(self)` — **before** step 2, not after
-2. `items = self.server.compute_history(hello.last_segment, hello.last_revision)`
+2. `items = self.server.compute_history(hello.last_segment, hello.last_revision, hello.history_seconds)`
 3. `await self.ws.send(History(items).to_json())`
 4. start `_sender_loop()` **and** `_probe_loop()` — after the HISTORY send, so HISTORY is
    always the first frame
