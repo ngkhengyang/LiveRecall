@@ -209,10 +209,13 @@
     }
   };
 
-  View.prototype.scrollToLatest = function () {
+  View.prototype.isFollowingLatest = function () {
     var el = this.liveEl;
-    var nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  };
+
+  View.prototype.scrollToLatest = function () {
+    this.liveEl.scrollTop = this.liveEl.scrollHeight;
   };
 
   View.prototype.renderRecall = function () {
@@ -342,6 +345,8 @@
   };
 
   Connection.prototype.applyUpdates = function (updates, recovered) {
+    // Measure before rendering: a large batch can move the bottom far away.
+    var followingLatest = this.view.isFollowingLatest();
     var changed = false;
     for (var i = 0; i < updates.length; i++) {
       var update = updates[i];
@@ -357,7 +362,7 @@
     }
     if (changed) {
       this.view.trimRows();
-      this.view.scrollToLatest();
+      if (followingLatest) this.view.scrollToLatest();
       this.view.renderRecall();
     }
     this.view.renderStats();
