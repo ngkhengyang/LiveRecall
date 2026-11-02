@@ -1,0 +1,4 @@
+# Install into a separate ASR environment, not the mandatory server environment.
+faster-whisper>=1.1,<2
+numpy>=1.23,<3
+websockets>=13,<17
