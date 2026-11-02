@@ -32,7 +32,8 @@ EXTRA = [
     ("rss_slope_mb_per_min", "RSS slope MB/min", 2),
 ]
 BA_COLUMNS = [COLUMNS[i] for i in (4, 7, 8, 5, 6, 12)] + [
-    (key, key.capitalize(), 0) for key in ("coalesced", "dropped", "resyncs")
+    (key, key.capitalize(), 0)
+    for key in ("coalesced", "rejected", "batches", "batched_finals", "resyncs")
 ]
 CATALOG = {s["id"]: s for s in SCENARIOS}
 

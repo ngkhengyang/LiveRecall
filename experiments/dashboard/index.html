@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveRecall Experiments</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1b1f27;--mute:#6a7383;--line:#e2e5ea;--accent:#2b6cb0;
+--pass:#1a7f4b;--fail:#c0392b;--skip:#8a93a3;--c1:#2b6cb0;--c2:#e08a1e;--c3:#2a9d8f;--c4:#8e5bd6;--c5:#d4457a;--c6:#7a8a99}
+@media (prefers-color-scheme:dark){:root{--bg:#12151a;--card:#1b2028;--ink:#e6e9ef;--mute:#98a2b3;--line:#2c333f;--accent:#6aa9ec;
+--pass:#4cc38a;--fail:#f06a5a;--skip:#7b8596;--c1:#6aa9ec;--c2:#f0a94a;--c3:#4fc3b4;--c4:#b08af0;--c5:#f07aa5;--c6:#9aa8b6}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+h1{font-size:16px;margin:0}
+nav{display:flex;gap:4px}
+nav button,.btn{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:6px 12px;border-radius:6px;cursor:pointer}
+nav button.on,.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.danger{color:var(--fail);border-color:var(--fail)}
+.btn:disabled{opacity:.5;cursor:default}
+select,input[type=number],input[type=text]{font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+main{padding:16px;max-width:1280px;margin:0 auto}
+.grid{display:grid;gap:12px}
+.kpis{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h2{font-size:13px;margin:0 0 8px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+.kpi b{display:block;font-size:26px;line-height:1.1}
+.kpi span{color:var(--mute);font-size:12px}
+.two{grid-template-columns:repeat(auto-fit,minmax(420px,1fr))}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+label{color:var(--mute);font-size:12px;display:flex;gap:6px;align-items:center}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mute);font-weight:600;font-size:12px;position:sticky;top:0;background:var(--card);cursor:pointer}
+tbody tr{cursor:pointer}tbody tr:hover{background:color-mix(in srgb,var(--accent) 8%,transparent)}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;font-weight:700;color:#fff}
+.PASS{background:var(--pass)}.FAIL{background:var(--fail)}.SKIP,.NONE{background:var(--skip)}
+.scroll{overflow:auto;max-height:560px}
+svg{width:100%;height:auto;display:block}
+svg text{fill:var(--mute);font-size:11px;font-family:inherit}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--mute);margin-top:6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+pre{background:#0d1117;color:#d6dde6;padding:12px;border-radius:8px;overflow:auto;max-height:480px;margin:0;font-size:12px;white-space:pre-wrap}
+#tip{position:fixed;pointer-events:none;background:#111;color:#fff;padding:5px 8px;border-radius:5px;font-size:12px;display:none;z-index:20;max-width:300px}
+.empty{color:var(--mute);padding:30px;text-align:center}
+.chk{display:grid;grid-template-columns:auto 1fr auto;gap:4px 10px;align-items:center}
+.muted{color:var(--mute)}
+fieldset{border:1px solid var(--line);border-radius:8px;margin:0;padding:8px 12px}
+fieldset label{color:var(--ink);font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1>LiveRecall Experiments</h1>
+  <nav id="tabs">
+    <button data-t="overview" class="on">Overview</button>
+    <button data-t="compare">Compare arms</button>
+    <button data-t="detail">Scenario detail</button>
+    <button data-t="run">Run experiments</button>
+  </nav>
+  <label style="margin-left:auto">Results folder <select id="outSel"></select></label>
+  <button class="btn" id="reload">Reload</button>
+</header>
+<main>
+  <section id="overview"></section>
+  <section id="compare" hidden></section>
+  <section id="detail" hidden></section>
+  <section id="run" hidden></section>
+</main>
+<div id="tip"></div>
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const NS = 'http://www.w3.org/2000/svg';
+const ARMS = ['final', 'naive', 'no-probe', 'no-grace', 'no-resync', 'no-all'];
+const ARM_COLOR = {final: 'var(--c1)', naive: 'var(--c2)', 'no-probe': 'var(--c3)', 'no-grace': 'var(--c4)', 'no-resync': 'var(--c5)', 'no-all': 'var(--c6)'};
+const METRICS = {
+  'p95_ms': 'p95 latency (ms)', 'p50_ms': 'p50 latency (ms)', 'p99_ms': 'p99 latency (ms)',
+  'normal_clients.p95_ms': 'Normal clients p95 (ms)', 'slow_clients.p95_ms': 'Slow clients p95 (ms)',
+  'final_completeness_pct': 'Final completeness (%)', 'fresh_final_pct': 'Fresh finals (%)',
+  'slow_clients.fresh_final_pct': 'Slow clients fresh finals (%)',
+  'normal_update_coverage_pct': 'Normal update coverage (%)', 'tail_update_coverage_pct': 'Tail update coverage (%)',
+  'recovery_p95_ms': 'Recovery p95 (ms)', 'peak_rss_mb': 'Peak RSS (MB)', 'rss_slope_mb_per_min': 'RSS slope (MB/min)',
+  'cpu_pct_mean': 'Mean CPU (%)', 'duplicates': 'Duplicates', 'stale': 'Stale', 'coalesced': 'Coalesced', 'resyncs': 'Resyncs', 'converge_s': 'Convergence (s)'
+};
+const S = {out: 'output/experiments', scenarios: [], dirs: [], res: {medians: {}, verdicts: []}, sel: null, arm: 'final', run: 1, metric: 'p95_ms', filter: 'all', sort: ['id', 1]};
+
+const get = (o, p) => p.split('.').reduce((a, k) => (a == null ? a : a[k]), o);
+const fmt = v => v == null ? '–' : typeof v !== 'number' ? v : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2).replace(/\.?0+$/, '');
+const api = async (u, o) => (await fetch(u, o)).json();
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+const sc = id => S.scenarios.find(s => s.id === id);
+
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const tip = $('#tip');
+function hover(node, html) {
+  node.addEventListener('mousemove', e => {tip.innerHTML = html; tip.style.display = 'block'; tip.style.left = e.clientX + 12 + 'px'; tip.style.top = e.clientY + 12 + 'px';});
+  node.addEventListener('mouseleave', () => tip.style.display = 'none');
+}
+function nice(max) {
+  if (!(max > 0)) return 1;
+  const p = 10 ** Math.floor(Math.log10(max)), f = max / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
+const tickLabel = v => v >= 1000 ? (v / 1000) + 'k' : String(+v.toFixed(2));
+
+/* ---- charts --------------------------------------------------------- */
+function chartBox(host, w, h) {
+  host.innerHTML = '';
+  return el('svg', {viewBox: `0 0 ${w} ${h}`}, host);
+}
+// series: [{name,color,values:[..|null]}], x labels = xs
+function lineChart(host, {xs, series, log = false, yLabel = '', xLabel = 's', markers = [], h = 260}) {
+  const w = 620, m = {l: 48, r: 10, t: 10, b: 28};
+  const svg = chartBox(host, w, h);
+  const all = series.flatMap(s => s.values).filter(v => v != null);
+  if (!all.length) {host.innerHTML = '<div class="empty">No data</div>'; return;}
+  const ymax = log ? 10 ** Math.ceil(Math.log10(Math.max(...all, 10))) : nice(Math.max(...all));
+  const ymin = log ? 1 : 0;
+  const X = i => m.l + (xs.length < 2 ? 0 : i / (xs.length - 1)) * (w - m.l - m.r);
+  const Y = v => {
+    const t = log ? (Math.log10(Math.max(v, 1)) - 0) / Math.log10(ymax) : v / ymax;
+    return h - m.b - t * (h - m.t - m.b);
+  };
+  const ticks = log ? Array.from({length: Math.log10(ymax) + 1}, (_, i) => 10 ** i) : [0, .25, .5, .75, 1].map(f => f * ymax);
+  for (const t of ticks) {
+    el('line', {x1: m.l, x2: w - m.r, y1: Y(t), y2: Y(t), stroke: 'var(--line)'}, svg);
+    el('text', {x: m.l - 6, y: Y(t) + 4, 'text-anchor': 'end'}, svg).textContent = tickLabel(t);
+  }
+  const step = Math.max(1, Math.ceil(xs.length / 10));
+  xs.forEach((x, i) => i % step === 0 && (el('text', {x: X(i), y: h - 8, 'text-anchor': 'middle'}, svg).textContent = x));
+  el('text', {x: w - m.r, y: h - 8, 'text-anchor': 'end'}, svg).textContent = xLabel;
+  if (yLabel) el('text', {x: m.l, y: 8}, svg).textContent = yLabel;
+  for (const mk of markers) {
+    const i = xs.indexOf(mk.t);
+    if (i < 0) continue;
+    const r = el('line', {x1: X(i), x2: X(i), y1: m.t, y2: h - m.b, stroke: mk.color, 'stroke-dasharray': '3 3', 'stroke-width': 1.5}, svg);
+    hover(r, mk.label);
+  }
+  for (const s of series) {
+    let d = '', pen = false;
+    s.values.forEach((v, i) => {if (v == null) {pen = false; return;} d += `${pen ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`; pen = true;});
+    el('path', {d, fill: 'none', stroke: s.color, 'stroke-width': 2, 'stroke-linejoin': 'round'}, svg);
+  }
+  // hover column
+  const cursor = el('line', {y1: m.t, y2: h - m.b, stroke: 'var(--mute)', opacity: 0}, svg);
+  const hit = el('rect', {x: m.l, y: m.t, width: w - m.l - m.r, height: h - m.t - m.b, fill: 'transparent'}, svg);
+  hit.addEventListener('mousemove', e => {
+    const b = svg.getBoundingClientRect(), px = (e.clientX - b.left) / b.width * w;
+    const i = Math.max(0, Math.min(xs.length - 1, Math.round((px - m.l) / (w - m.l - m.r) * (xs.length - 1))));
+    cursor.setAttribute('x1', X(i)); cursor.setAttribute('x2', X(i)); cursor.setAttribute('opacity', 1);
+    tip.innerHTML = `<b>${xs[i]} ${xLabel}</b><br>` + series.map(s => `${s.name}: ${fmt(s.values[i])}`).join('<br>');
+    tip.style.display = 'block'; tip.style.left = e.clientX + 12 + 'px'; tip.style.top = e.clientY + 12 + 'px';
+  });
+  hit.addEventListener('mouseleave', () => {tip.style.display = 'none'; cursor.setAttribute('opacity', 0);});
+  legend(host, series);
+}
+function legend(host, series) {
+  const d = document.createElement('div'); d.className = 'legend';
+  d.innerHTML = series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('');
+  host.appendChild(d);
+}
+// groups: [{label, bars:[{name,color,value}]}]
+function barChart(host, {groups, unit = '', threshold = null, h = 280, horizontal = false}) {
+  const vals = groups.flatMap(g => g.bars.map(b => b.value)).filter(v => v != null);
+  if (!vals.length) {host.innerHTML = '<div class="empty">No data for this metric</div>'; return;}
+  const w = 620, m = {l: 48, r: 10, t: 14, b: 60};
+  const svg = chartBox(host, w, h);
+  const max = nice(Math.max(...vals, threshold ?? 0));
+  const Y = v => h - m.b - v / max * (h - m.t - m.b);
+  for (const f of [0, .25, .5, .75, 1]) {
+    el('line', {x1: m.l, x2: w - m.r, y1: Y(f * max), y2: Y(f * max), stroke: 'var(--line)'}, svg);
+    el('text', {x: m.l - 6, y: Y(f * max) + 4, 'text-anchor': 'end'}, svg).textContent = tickLabel(f * max);
+  }
+  const gw = (w - m.l - m.r) / groups.length;
+  groups.forEach((g, gi) => {
+    const bw = Math.min(26, (gw - 8) / g.bars.length);
+    const x0 = m.l + gi * gw + (gw - bw * g.bars.length) / 2;
+    g.bars.forEach((b, bi) => {
+      if (b.value == null) return;
+      const r = el('rect', {x: x0 + bi * bw, y: Y(b.value), width: bw - 2, height: Math.max(1, h - m.b - Y(b.value)), fill: b.color, rx: 2}, svg);
+      hover(r, `<b>${esc(g.label)}</b><br>${esc(b.name)}: ${fmt(b.value)} ${unit}`);
+    });
+    const t = el('text', {x: m.l + gi * gw + gw / 2, y: h - m.b + 12, 'text-anchor': groups.length > 6 ? 'end' : 'middle',
+      transform: groups.length > 6 ? `rotate(-40 ${m.l + gi * gw + gw / 2} ${h - m.b + 12})` : ''}, svg);
+    t.textContent = g.label;
+  });
+  if (threshold != null) {
+    el('line', {x1: m.l, x2: w - m.r, y1: Y(threshold), y2: Y(threshold), stroke: 'var(--fail)', 'stroke-dasharray': '5 4', 'stroke-width': 1.5}, svg);
+    el('text', {x: w - m.r, y: Y(threshold) - 4, 'text-anchor': 'end', style: 'fill:var(--fail)'}, svg).textContent = 'target ' + threshold;
+  }
+  const names = [...new Map(groups.flatMap(g => g.bars).map(b => [b.name, b.color]))];
+  if (names.length > 1) legend(host, names.map(([name, color]) => ({name, color})));
+}
+function histChart(host, hist) {
+  const w = 620, h = 240, m = {l: 48, r: 10, t: 10, b: 36};
+  const svg = chartBox(host, w, h);
+  const max = nice(Math.max(...hist.normal, ...hist.slow, 1));
+  const bw = (w - m.l - m.r) / 20, Y = v => h - m.b - v / max * (h - m.t - m.b);
+  for (const f of [0, .5, 1]) {
+    el('line', {x1: m.l, x2: w - m.r, y1: Y(f * max), y2: Y(f * max), stroke: 'var(--line)'}, svg);
+    el('text', {x: m.l - 6, y: Y(f * max) + 4, 'text-anchor': 'end'}, svg).textContent = tickLabel(f * max);
+  }
+  [['normal', 'var(--c1)', 0], ['slow', 'var(--c2)', .5]].forEach(([k, c, o]) => hist[k].forEach((v, i) => {
+    if (!v) return;
+    const r = el('rect', {x: m.l + i * bw + o * bw / 2, y: Y(v), width: bw / 2 - 1, height: h - m.b - Y(v), fill: c, rx: 1}, svg);
+    hover(r, `${k}: ${v} msgs<br>${fmt(hist.edges[i])}–${fmt(hist.edges[i + 1])} ms`);
+  }));
+  [0, 4, 8, 12, 16, 20].forEach(i => el('text', {x: m.l + i * bw, y: h - 18, 'text-anchor': 'middle'}, svg).textContent = tickLabel(hist.edges[i]));
+  el('text', {x: w - m.r, y: h - 4, 'text-anchor': 'end'}, svg).textContent = 'latency (ms, log scale)';
+  legend(host, [{name: 'normal clients', color: 'var(--c1)'}, {name: 'slow clients', color: 'var(--c2)'}]);
+}
+
+/* ---- data ----------------------------------------------------------- */
+function verdictFor(id, arm) {
+  const vs = S.res.verdicts.filter(v => v.id === id && (!arm || v.arm === arm));
+  if (!vs.length) return 'NONE';
+  return vs.some(v => v.verdict === 'FAIL') ? 'FAIL' : vs.every(v => v.verdict === 'SKIP') ? 'SKIP' : 'PASS';
+}
+const badge = v => `<span class="badge ${v}">${v === 'NONE' ? 'NO DATA' : v}</span>`;
+async function load() {
+  const info = await api('/api/scenarios');
+  S.scenarios = info.scenarios; S.dirs = info.dirs;
+  if (!S.dirs.includes(S.out) && S.dirs.length) S.out = S.dirs[0];
+  $('#outSel').innerHTML = S.dirs.map(d => `<option ${d === S.out ? 'selected' : ''}>${d}</option>`).join('') || '<option>(no results yet)</option>';
+  S.res = await api('/api/results?out=' + encodeURIComponent(S.out));
+  if (!S.sel) S.sel = (S.scenarios.find(s => S.res.medians[s.id]) || S.scenarios[0]).id;
+  render();
+}
+$('#outSel').onchange = e => {S.out = e.target.value; load();};
+$('#reload').onclick = load;
+$('#tabs').onclick = e => {
+  const t = e.target.dataset.t; if (!t) return;
+  tab(t);
+};
+function tab(t) {
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  document.querySelectorAll('main > section').forEach(s => s.hidden = s.id !== t);
+  S.tab = t; render();
+}
+function render() {
+  ({overview: renderOverview, compare: renderCompare, detail: renderDetail, run: renderRun}[S.tab || 'overview'])();
+}
+
+/* ---- overview ------------------------------------------------------- */
+function renderOverview() {
+  const root = $('#overview');
+  const ids = S.scenarios.map(s => s.id);
+  const have = ids.filter(id => S.res.medians[id]);
+  const vs = ids.map(id => verdictFor(id));
+  const count = k => vs.filter(v => v === k).length;
+  const finals = have.map(id => S.res.medians[id].final).filter(Boolean);
+  const worst = Math.max(0, ...finals.map(m => m.p95_ms ?? 0));
+  root.innerHTML = `
+  <div class="grid kpis">
+    <div class="card kpi"><b>${have.length}<span> / ${ids.length}</span></b><span>scenarios with results</span></div>
+    <div class="card kpi"><b style="color:var(--pass)">${count('PASS')}</b><span>passing</span></div>
+    <div class="card kpi"><b style="color:var(--fail)">${count('FAIL')}</b><span>failing</span></div>
+    <div class="card kpi"><b style="color:var(--skip)">${count('SKIP')}</b><span>skipped (need tc/netem)</span></div>
+    <div class="card kpi"><b>${fmt(Math.min(...finals.map(m => m.final_completeness_pct ?? 100), 100))}%</b><span>lowest final completeness</span></div>
+    <div class="card kpi"><b>${fmt(worst)} ms</b><span>worst p95 (final arm)</span></div>
+  </div>
+  <div class="card" style="margin-bottom:12px">
+    <div class="row" style="margin:0 0 8px"><h2 style="margin:0">Metric across scenarios (final arm)</h2>
+      <select id="ovMetric">${Object.entries(METRICS).map(([k, v]) => `<option value="${k}" ${k === S.metric ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+    <div id="ovChart"></div>
+  </div>
+  <div class="card">
+    <div class="row">
+      <h2 style="margin:0">All scenarios</h2>
+      <select id="ovFilter">${['all', 'public', 'hidden', 'before_after', 'with results', 'failing'].map(f => `<option ${f === S.filter ? 'selected' : ''}>${f}</option>`).join('')}</select>
+      <span class="muted">Click a row for graphs.</span>
+    </div>
+    <div class="scroll"><table><thead><tr>
+      ${[['id', 'Scenario'], ['component', 'Component'], ['clients', 'Clients'], ['p95_ms', 'p95 ms'], ['final_completeness_pct', 'Finals %'], ['peak_rss_mb', 'RSS MB'], ['verdict', 'Verdict']]
+        .map(([k, l]) => `<th data-k="${k}">${l}${S.sort[0] === k ? (S.sort[1] > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}
+    </tr></thead><tbody id="ovBody"></tbody></table></div>
+  </div>`;
+  $('#ovMetric').onchange = e => {S.metric = e.target.value; renderOverview();};
+  $('#ovFilter').onchange = e => {S.filter = e.target.value; renderOverview();};
+  root.querySelectorAll('th').forEach(th => th.onclick = () => {
+    const k = th.dataset.k; S.sort = [k, S.sort[0] === k ? -S.sort[1] : 1]; renderOverview();
+  });
+  const rows = S.scenarios.map(s => {
+    const m = S.res.medians[s.id]?.final;
+    return {id: s.id, s, m, component: s.component || '', clients: s.clients, p95_ms: m?.p95_ms, final_completeness_pct: m?.final_completeness_pct, peak_rss_mb: m?.peak_rss_mb, verdict: verdictFor(s.id)};
+  }).filter(r => S.filter === 'all' || r.s.suite === S.filter || (S.filter === 'with results' && r.m) || (S.filter === 'failing' && r.verdict === 'FAIL'));
+  const [k, dir] = S.sort;
+  rows.sort((a, b) => ((a[k] ?? -1) > (b[k] ?? -1) ? 1 : -1) * dir);
+  $('#ovBody').innerHTML = rows.map(r => `<tr data-id="${r.id}">
+    <td><b>${r.id}</b> <span class="muted">${r.s.suite}</span></td><td>${esc(r.component)}</td><td class="n">${r.clients}</td>
+    <td class="n">${fmt(r.p95_ms)}</td><td class="n">${fmt(r.final_completeness_pct)}</td><td class="n">${fmt(r.peak_rss_mb)}</td><td>${badge(r.verdict)}</td></tr>`).join('');
+  $('#ovBody').onclick = e => {const tr = e.target.closest('tr'); if (tr) {S.sel = tr.dataset.id; S.arm = 'final'; S.run = 1; tab('detail');}};
+  const thr = {p95_ms: 500, 'normal_clients.p95_ms': 500, final_completeness_pct: 99, peak_rss_mb: 300}[S.metric] ?? null;
+  barChart($('#ovChart'), {
+    groups: have.map(id => ({label: id, bars: [{name: 'final', color: 'var(--c1)', value: get(S.res.medians[id].final || {}, S.metric)}]})).filter(g => g.bars[0].value != null),
+    threshold: thr, unit: '', h: 300,
+  });
+}
+
+/* ---- compare -------------------------------------------------------- */
+function renderCompare() {
+  const root = $('#compare');
+  const multi = S.scenarios.filter(s => Object.keys(S.res.medians[s.id] || {}).length > 1);
+  if (!multi.length) {root.innerHTML = '<div class="card empty">No scenario has more than one arm yet. Run the <b>before_after</b> suite, or H2 / H3 (final vs naive), from the Run tab.</div>'; return;}
+  if (!multi.find(s => s.id === S.cmp)) S.cmp = multi[0].id;
+  const med = S.res.medians[S.cmp];
+  root.innerHTML = `
+  <div class="row">
+    <label>Scenario <select id="cmpSc">${multi.map(s => `<option ${s.id === S.cmp ? 'selected' : ''}>${s.id}</option>`).join('')}</select></label>
+    <span class="muted">Arms: <b>final</b> = our server; <b>naive</b> = starter server; <b>no-*</b> = one mechanism ablated.</span>
+  </div>
+  <div class="grid two" id="cmpGrid"></div>
+  <div class="card" style="margin-top:12px"><h2>Table</h2><div class="scroll"><table id="cmpTable"></table></div></div>`;
+  $('#cmpSc').onchange = e => {S.cmp = e.target.value; renderCompare();};
+  const arms = ARMS.filter(a => med[a]);
+  const panels = [['p95_ms', 'p95 latency (ms)'], ['normal_clients.p95_ms', 'Normal clients p95 (ms)'], ['slow_clients.fresh_final_pct', 'Slow clients: fresh finals (%)'],
+    ['final_completeness_pct', 'Final completeness (%)'], ['peak_rss_mb', 'Peak RSS (MB)'], ['coalesced', 'Coalesced updates']];
+  const grid = $('#cmpGrid');
+  for (const [metric, title] of panels) {
+    const card = document.createElement('div'); card.className = 'card'; card.innerHTML = `<h2>${title}</h2><div></div>`; grid.appendChild(card);
+    barChart(card.lastChild, {groups: [{label: S.cmp, bars: arms.map(a => ({name: a, color: ARM_COLOR[a], value: get(med[a], metric)}))}], h: 220});
+  }
+  const keys = Object.keys(METRICS);
+  $('#cmpTable').innerHTML = `<thead><tr><th>Metric</th>${arms.map(a => `<th>${a}</th>`).join('')}</tr></thead><tbody>` +
+    keys.map(k => `<tr><td>${METRICS[k]}</td>${arms.map(a => `<td class="n">${fmt(get(med[a], k))}</td>`).join('')}</tr>`).join('') + '</tbody>';
+}
+
+/* ---- detail --------------------------------------------------------- */
+async function renderDetail() {
+  const root = $('#detail');
+  const arms = ARMS.filter(a => S.res.medians[S.sel]?.[a]);
+  if (arms.length && !arms.includes(S.arm)) S.arm = arms[0];
+  const s = sc(S.sel);
+  root.innerHTML = `
+  <div class="row">
+    <label>Scenario <select id="dSc">${S.scenarios.map(x => `<option ${x.id === S.sel ? 'selected' : ''}>${x.id}</option>`).join('')}</select></label>
+    <label>Arm <select id="dArm">${arms.map(a => `<option ${a === S.arm ? 'selected' : ''}>${a}</option>`).join('')}</select></label>
+    <label>Run <select id="dRun"></select></label>
+    <label><input type="checkbox" id="dLog" ${S.logy !== false ? 'checked' : ''}> log latency axis</label>
+  </div>
+  <div class="card" style="margin-bottom:12px"><h2>${s.id} — ${esc(s.component || s.suite)}</h2>
+    <span class="muted">${s.clients} clients · ${s.duration}s${s.slow_percent ? ` · ${s.slow_percent}% slow @ ${s.slow_ms}ms` : ''}${s.disconnect_percent ? ` · ${s.disconnect_percent}% disconnect for ${s.disconnect_seconds}s` : ''}${s.late_percent ? ` · ${s.late_percent}% late joiners` : ''}${s.tc?.length ? ` · tc: ${esc(s.tc.map(t => t[1]).join(', '))}` : ''}</span></div>
+  <div id="dBody"></div>`;
+  $('#dSc').onchange = e => {S.sel = e.target.value; S.run = 1; renderDetail();};
+  $('#dArm').onchange = e => {S.arm = e.target.value; S.run = 1; renderDetail();};
+  $('#dRun').onchange = e => {S.run = +e.target.value; renderDetail();};
+  $('#dLog').onchange = e => {S.logy = e.target.checked; renderDetail();};
+  const body = $('#dBody');
+  const m = S.res.medians[S.sel]?.[S.arm];
+  if (!m) {body.innerHTML = '<div class="card empty">No results for this scenario in <b>' + esc(S.out) + '</b>. Run it from the Run tab, or switch results folder.</div>'; return;}
+  const kp = [['p50_ms', 'p50 ms'], ['p95_ms', 'p95 ms'], ['p99_ms', 'p99 ms'], ['final_completeness_pct', 'finals %'], ['normal_update_coverage_pct', 'update coverage %'], ['duplicates', 'duplicates'], ['peak_rss_mb', 'peak RSS MB'], ['cpu_pct_mean', 'CPU %']];
+  const checks = S.res.verdicts.filter(v => v.id === S.sel && v.arm === S.arm);
+  body.innerHTML = `
+  <div class="grid kpis">${kp.map(([k, l]) => `<div class="card kpi"><b>${fmt(m[k])}</b><span>${l}</span></div>`).join('')}</div>
+  <div class="grid two">
+    <div class="card"><h2>Latency over time (p95 per second)</h2><div id="gLat"></div></div>
+    <div class="card"><h2>Messages delivered per second</h2><div id="gCnt"></div></div>
+    <div class="card"><h2>Latency distribution</h2><div id="gHist"></div></div>
+    <div class="card"><h2>Server memory (RSS)</h2><div id="gRss"></div></div>
+    <div class="card"><h2>Checks</h2><div class="chk" id="gChk"></div></div>
+    <div class="card"><h2>All metrics (median of ${m._runs} run${m._runs === 1 ? '' : 's'})</h2><div class="scroll" style="max-height:300px"><table>${Object.entries(METRICS).map(([k, l]) => `<tr><td>${l}</td><td class="n">${fmt(get(m, k))}</td></tr>`).join('')}</table></div></div>
+  </div>`;
+  $('#gChk').innerHTML = checks.length ? checks.map(c => `${badge(c.verdict)}<span>${esc(c.check)}</span><span class="muted">${fmt(c.value)} ${c.threshold != null ? '(target ' + esc(c.threshold) + ')' : ''}</span>`).join('') : '<span class="muted">No verdicts recorded.</span>';
+  const d = await api(`/api/detail?out=${encodeURIComponent(S.out)}&id=${S.sel}&arm=${S.arm}&run=${S.run}`);
+  $('#dRun').innerHTML = (d.runs || [1]).map(r => `<option ${r === S.run ? 'selected' : ''}>${r}</option>`).join('');
+  if (d.error) {['gLat', 'gCnt', 'gHist', 'gRss'].forEach(i => $('#' + i).innerHTML = `<div class="empty">${esc(d.error)}</div>`); return;}
+  const t = d.timeline, log = $('#dLog').checked;
+  const markers = d.events.map(e => ({t: e.t, color: e.kind === 'FORCED_DISCONNECT' ? 'var(--fail)' : 'var(--pass)', label: `${e.n} × ${e.kind === 'FORCED_DISCONNECT' ? 'forced disconnect' : 'reconnect'}`}));
+  lineChart($('#gLat'), {xs: t.t, log, yLabel: 'ms', markers, series: [
+    {name: 'normal p95', color: 'var(--c1)', values: t.normal_p95}, {name: 'slow p95', color: 'var(--c2)', values: t.slow_p95},
+    {name: 'normal p50', color: 'var(--c3)', values: t.normal_p50}]});
+  lineChart($('#gCnt'), {xs: t.t, yLabel: 'msgs', markers, series: [{name: 'normal clients', color: 'var(--c1)', values: t.normal_count}, {name: 'slow clients', color: 'var(--c2)', values: t.slow_count}]});
+  histChart($('#gHist'), d.hist);
+  if (d.rss.length) lineChart($('#gRss'), {xs: d.rss.map(r => r[0].toFixed(0)), yLabel: 'MB', series: [{name: 'RSS', color: 'var(--c4)', values: d.rss.map(r => r[1])}]});
+  else $('#gRss').innerHTML = '<div class="empty">No memory samples</div>';
+}
+
+/* ---- run ------------------------------------------------------------ */
+let pollTimer = null, logSince = 0;
+function renderRun() {
+  const root = $('#run');
+  if (root.dataset.built) {poll(); return;}
+  root.dataset.built = 1;
+  const suites = ['all', 'public', 'hidden', 'before_after'];
+  root.innerHTML = `
+  <div class="grid two">
+   <div class="card"><h2>Configure</h2>
+    <div class="grid" style="gap:10px">
+     <label>Suite <select id="rSuite">${suites.map(x => `<option>${x}</option>`).join('')}</select></label>
+     <label>Scenarios (prefixes, comma-sep; empty = all) <input type="text" id="rOnly" placeholder="e.g. T1,H2,H10" style="flex:1"></label>
+     <label>Runs per case <input type="number" id="rRuns" min="1" value="1" style="width:70px"></label>
+     <label><input type="checkbox" id="rQuick" checked> Quick mode (shortened workloads)</label>
+     <fieldset><legend class="muted">Arms (empty = scenario defaults)</legend>${ARMS.map(a => `<label><input type="checkbox" class="rArm" value="${a}"> ${a}</label> `).join('')}</fieldset>
+     <label>Network impairment (tc) <select id="rTc"><option value="no">skip tc scenarios</option><option value="yes">include (needs sudo + netem)</option><option value="only">only tc scenarios</option></select></label>
+     <label>Output folder <input type="text" id="rOut" value="output/experiments-ui" style="flex:1"></label>
+     <div class="row" style="margin:0"><button class="btn primary" id="rGo">Start run</button><button class="btn danger" id="rStop" disabled>Stop</button><span id="rState" class="muted"></span></div>
+    </div>
+    <p class="muted">Quick presets: <a href="#" data-p="T1">T1 basic</a> · <a href="#" data-p="H2_s30">H2 slow readers</a> · <a href="#" data-p="H4_p50_d10">H4 reconnect</a> · <a href="#" data-p="H10">H10 protocol edge</a> · <a href="#" data-p="BA_">before/after</a></p>
+   </div>
+   <div class="card"><h2>Live output</h2><pre id="rLog">Nothing running.</pre></div>
+  </div>`;
+  root.querySelectorAll('[data-p]').forEach(a => a.onclick = e => {
+    e.preventDefault(); $('#rOnly').value = a.dataset.p;
+    $('#rSuite').value = a.dataset.p.startsWith('BA_') ? 'before_after' : 'all';
+    if (a.dataset.p.startsWith('H2')) root.querySelectorAll('.rArm').forEach(c => c.checked = ['final', 'naive'].includes(c.value));
+  });
+  $('#rGo').onclick = async () => {
+    const r = await api('/api/run', {method: 'POST', body: JSON.stringify({
+      suite: $('#rSuite').value, only: $('#rOnly').value.trim(), runs: +$('#rRuns').value, quick: $('#rQuick').checked,
+      arms: [...root.querySelectorAll('.rArm:checked')].map(c => c.value), tc: $('#rTc').value, out: $('#rOut').value})});
+    if (r.error) {$('#rState').textContent = r.error; return;}
+    logSince = 0; S.ranDone = null; $('#rLog').textContent = ''; S.out = r.out; poll();
+  };
+  $('#rStop').onclick = () => api('/api/run/stop', {method: 'POST'});
+  poll();
+}
+async function poll() {
+  clearTimeout(pollTimer);
+  const st = await api('/api/run/status?since=' + logSince);
+  const log = $('#rLog'); if (!log) return;
+  if (st.lines.length) {
+    const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    log.textContent = (logSince ? log.textContent : '') + st.lines.join('\n') + '\n';
+    logSince = st.total; if (stick) log.scrollTop = log.scrollHeight;
+  }
+  $('#rGo').disabled = st.running; $('#rStop').disabled = !st.running;
+  $('#rState').textContent = st.running ? `running… ${st.elapsed.toFixed(0)}s` : st.command ? `finished (exit ${st.returncode}) in ${st.elapsed.toFixed(0)}s — results in the selected folder` : '';
+  if (st.running) pollTimer = setTimeout(poll, 1000);
+  else if (st.command && !S.ranDone) {S.ranDone = st.command; load();}
+}
+S.tab = 'overview';
+load();
+</script>
+</body>
+</html>

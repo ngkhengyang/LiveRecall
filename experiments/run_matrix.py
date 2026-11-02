@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import copy
 import csv
+import hashlib
 import json
 import math
 import operator
@@ -53,6 +54,23 @@ ROLE_ARGS = (
 
 def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2), encoding="utf-8")
+
+
+def implementation_digest() -> str:
+    digest = hashlib.sha256()
+    paths = [
+        *sorted((ROOT / "submission_root/app").glob("*.py")),
+        ROOT / "experiments/naive_server.py",
+        ROOT / "test/run_demo.py",
+        ROOT / "test/load_clients.py",
+        ROOT / "test/caption_source.py",
+        ROOT / "test/analyse_results.py",
+        Path(__file__).resolve(),
+    ]
+    for path in paths:
+        digest.update(str(path.relative_to(ROOT)).encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def numeric(value: Any) -> bool:
@@ -266,17 +284,23 @@ def log_metrics(path: Path, quiet: bool) -> dict:
     text = path.read_text(encoding="utf-8", errors="replace")
     return {
         **{
-            key: (
-                None
-                if quiet
-                else sum(
-                    int(v)
+            key: (sum(int(v) for v in values) if values and not quiet else None)
+            for key in (
+                "coalesced",
+                "dropped",
+                "rejected",
+                "held",
+                "batches",
+                "batched_finals",
+            )
+            for values in [
+                [
+                    v
                     for line in text.splitlines()
                     if "client disconnected:" in line
-                    for v in re.findall(rf"{key}=(\d+)", line)
-                )
-            )
-            for key in ("coalesced", "dropped", "held")
+                    for v in re.findall(rf"\b{key}=(\d+)", line)
+                ]
+            ]
         },
         "resyncs": None if quiet else text.count("client resync:"),
     }
@@ -550,6 +574,12 @@ def main() -> int:
     )
     parser.add_argument("--only", default="")
     parser.add_argument("--runs", type=int)
+    parser.add_argument(
+        "--arms",
+        nargs="+",
+        choices=("final", "naive", *ABLATIONS),
+        help="Restrict scenarios to these comparison arms",
+    )
     parser.add_argument("--quick", action="store_true")
     tc_selection = parser.add_mutually_exclusive_group()
     tc_selection.add_argument("--no-tc", action="store_true")
@@ -561,11 +591,12 @@ def main() -> int:
     if args.runs is not None and args.runs < 1:
         parser.error("--runs must be >= 1")
     selected = [
-        s
+        dict(s, arms=[a for a in s["arms"] if not args.arms or a in args.arms])
         for s in SCENARIOS
         if (args.suite == "all" or s["suite"] == args.suite)
         and (not args.only or any(s["id"].startswith(p) for p in args.only.split(",")))
         and (not args.tc_only or s["needs_tc"])
+        and (not args.arms or set(s["arms"]).intersection(args.arms))
     ]
     if args.list:
         for scenario in selected:
@@ -577,11 +608,18 @@ def main() -> int:
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
     med = {}
+    configurations = {}
+    implementation = implementation_digest()
     for scenario in SCENARIOS:
         for arm in scenario["arms"]:
             path = args.out / scenario["id"] / f"{arm}_median.json"
             if path.exists():
                 med[scenario["id"], arm] = json.loads(path.read_text(encoding="utf-8"))
+            config_path = args.out / scenario["id"] / f"{arm}_configuration.json"
+            if config_path.exists():
+                configurations[scenario["id"], arm] = json.loads(
+                    config_path.read_text(encoding="utf-8")
+                )
     verdicts = []
 
     def record(
@@ -616,6 +654,25 @@ def main() -> int:
             )
             directory = args.out / scenario["id"]
             directory.mkdir(parents=True, exist_ok=True)
+            configuration = {
+                key: scenario.get(key)
+                for key in (
+                    "clients",
+                    "duration",
+                    *ROLE_ARGS,
+                    "source_args",
+                    "tc",
+                    "impairment",
+                )
+            }
+            configuration.update(
+                runs=args.runs or scenario["runs"],
+                quick=args.quick,
+                implementation_sha256=implementation,
+                python=sys.version,
+            )
+            # Normalize tuples as JSON arrays so saved and current settings compare equally.
+            configuration = json.loads(json.dumps(configuration))
             if scenario["needs_tc"] and tc_ok is None:
                 tc_ok = False if args.no_tc else tc.available()
             reason = None
@@ -627,6 +684,8 @@ def main() -> int:
             ):
                 reason = "protocol edge script not present"
             for arm in scenario["arms"]:
+                configurations[scenario["id"], arm] = configuration
+                write_json(directory / f"{arm}_configuration.json", configuration)
                 if reason:
                     record(scenario, arm, reason, "SKIP")
                     continue
@@ -635,7 +694,12 @@ def main() -> int:
                 median_path = directory / f"{arm}_median.json"
                 if scenario["suite"] == "before_after" and arm == "final":
                     reused = med.get((scenario["reuse"], "final"))
-                    if reused is not None:
+                    if (
+                        reused is not None
+                        and configurations.get((scenario["reuse"], "final"))
+                        == configuration
+                        and reused.get("runs_completed") == configuration["runs"]
+                    ):
                         med[key] = reused
                         write_json(median_path, reused)
                         record(scenario, arm, f"reused {scenario['reuse']}", "PASS")
@@ -651,6 +715,7 @@ def main() -> int:
                         record(scenario, arm, f"run {run}: {exc}", "ERROR")
                 if results:
                     med[key] = medians(results)
+                    med[key]["runs_completed"] = len(results)
                     write_json(median_path, med[key])
                     completed.add(key)
                 else:

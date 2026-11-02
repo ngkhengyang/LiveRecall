@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from typing import TYPE_CHECKING
 
 from websockets.exceptions import ConnectionClosed
@@ -44,6 +45,15 @@ from .protocol import CaptionUpdate, ClientHello, History
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
     from .server import Server
+
+
+ABLATIONS = {
+    name.strip()
+    for name in os.environ.get("LIVERECALL_ABLATE", "").split(",")
+    if name.strip()
+}
+if "all" in ABLATIONS:
+    ABLATIONS.update(("probe", "grace", "resync"))
 
 
 class Client:
@@ -136,10 +146,9 @@ class Client:
             # task that could emit live updates does not exist until after it
             # has been sent.
             await self.ws.send(History(items).to_json())
-            self._tasks = [
-                asyncio.create_task(self._sender_loop()),
-                asyncio.create_task(self._probe_loop()),
-            ]
+            self._tasks = [asyncio.create_task(self._sender_loop())]
+            if "probe" not in ABLATIONS:
+                self._tasks.append(asyncio.create_task(self._probe_loop()))
             # Clients send nothing after the hello. This loop exists to notice
             # the disconnect and to let the library's keepalive run.
             async for _ in self.ws:
@@ -237,10 +246,11 @@ class Client:
     def _next_delivery(self) -> CaptionUpdate | History | None:
         """Batch unsent finals only during catch-up or actual queue pressure."""
         catching_up = self._catchup or self._buffer.pressured
+        grace = 0.0 if "grace" in ABLATIONS else self.PROVISIONAL_GRACE_SECONDS
         if catching_up:
             # Continuing final batches must not starve active segments.
             if self._final_batches_since_active >= self.MAX_FINAL_BATCHES_BEFORE_ACTIVE:
-                active = self._buffer.take_active_update(self.PROVISIONAL_GRACE_SECONDS)
+                active = self._buffer.take_active_update(grace)
                 if active is not None:
                     self._final_batches_since_active = 0
                     return active
@@ -250,7 +260,7 @@ class Client:
                 return History(items)
         delivery = self._buffer.next_update(
             prefer_final=catching_up,
-            provisional_grace=self.PROVISIONAL_GRACE_SECONDS,
+            provisional_grace=grace,
         )
         if delivery is not None and not delivery.final:
             self._final_batches_since_active = 0
@@ -290,13 +300,16 @@ class Client:
                     self._catchup_until = loop.time() + self.CATCHUP_STICKY_SECONDS
                     self._wake.set()
                     try:
-                        await asyncio.wait_for(
-                            asyncio.shield(pong),
-                            timeout=max(
-                                0.0,
-                                self._resync_threshold() - self._behind_threshold(),
-                            ),
-                        )
+                        if "resync" in ABLATIONS:
+                            await asyncio.shield(pong)
+                        else:
+                            await asyncio.wait_for(
+                                asyncio.shield(pong),
+                                timeout=max(
+                                    0.0,
+                                    self._resync_threshold() - self._behind_threshold(),
+                                ),
+                            )
                     except asyncio.TimeoutError:
                         print(
                             f"client resync: id={self.hello.client_id}; "

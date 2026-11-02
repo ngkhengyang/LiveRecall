@@ -5,7 +5,7 @@ SHELL := /bin/bash
 	t1-basic t2-scale t3-slow t3-monitor t4-reconnect \
 	t5-network t5-network-enable t5-network-reset \
 	exp-list exp-quick exp-public exp-hidden exp-before-after exp-all \
-	exp-tc exp-edge exp-report
+	exp-tc exp-edge exp-report exp-ui
 
 
 # START_HERE.md
@@ -127,3 +127,7 @@ exp-edge:
 # Regenerate SUMMARY.md and summary.csv from stored results.
 exp-report:
 	./venv/bin/python experiments/report.py --out $(EXP_OUT)
+
+# Web dashboard for graphs, results and launching experiments: http://127.0.0.1:8100
+exp-ui:
+	./venv/bin/python experiments/dashboard.py
