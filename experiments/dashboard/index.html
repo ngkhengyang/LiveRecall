@@ -57,6 +57,7 @@ fieldset label{color:var(--ink);font-size:13px}
     <button data-t="overview" class="on">Overview</button>
     <button data-t="compare">Compare arms</button>
     <button data-t="detail">Scenario detail</button>
+    <button data-t="cases">Test cases</button>
     <button data-t="run">Run experiments</button>
   </nav>
   <label style="margin-left:auto">Results folder <select id="outSel"></select></label>
@@ -66,6 +67,7 @@ fieldset label{color:var(--ink);font-size:13px}
   <section id="overview"></section>
   <section id="compare" hidden></section>
   <section id="detail" hidden></section>
+  <section id="cases" hidden></section>
   <section id="run" hidden></section>
 </main>
 <div id="tip"></div>
@@ -244,7 +246,7 @@ function tab(t) {
   S.tab = t; render();
 }
 function render() {
-  ({overview: renderOverview, compare: renderCompare, detail: renderDetail, run: renderRun}[S.tab || 'overview'])();
+  ({overview: renderOverview, compare: renderCompare, detail: renderDetail, cases: renderCases, run: renderRun}[S.tab || 'overview'])();
 }
 
 /* ---- overview ------------------------------------------------------- */
@@ -346,7 +348,11 @@ async function renderDetail() {
   </div>
   <div class="card" style="margin-bottom:12px"><h2>${s.id} — ${esc(s.component || s.suite)}</h2>
     <span class="muted">${s.clients} clients · ${s.duration}s${s.slow_percent ? ` · ${s.slow_percent}% slow @ ${s.slow_ms}ms` : ''}${s.disconnect_percent ? ` · ${s.disconnect_percent}% disconnect for ${s.disconnect_seconds}s` : ''}${s.late_percent ? ` · ${s.late_percent}% late joiners` : ''}${s.tc?.length ? ` · tc: ${esc(s.tc.map(t => t[1]).join(', '))}` : ''}</span></div>
+  <div id="dDesc" class="card" style="margin-bottom:12px"></div>
   <div id="dBody"></div>`;
+  if (!S.cat) S.cat = await api('/api/testcases');
+  const fam = S.cat.families.find(f => f.cases.some(c => c.id === S.sel));
+  if (fam) $('#dDesc').innerHTML = `<h2>${esc(fam.id)} — ${esc(fam.title)}</h2><p style="margin:0 0 6px">${esc(fam.what)}</p><p style="margin:0"><b>Good result:</b> ${esc(fam.good)}</p>`;
   $('#dSc').onchange = e => {S.sel = e.target.value; S.run = 1; renderDetail();};
   $('#dArm').onchange = e => {S.arm = e.target.value; S.run = 1; renderDetail();};
   $('#dRun').onchange = e => {S.run = +e.target.value; renderDetail();};
@@ -379,6 +385,29 @@ async function renderDetail() {
   histChart($('#gHist'), d.hist);
   if (d.rss.length) lineChart($('#gRss'), {xs: d.rss.map(r => r[0].toFixed(0)), yLabel: 'MB', series: [{name: 'RSS', color: 'var(--c4)', values: d.rss.map(r => r[1])}]});
   else $('#gRss').innerHTML = '<div class="empty">No memory samples</div>';
+}
+
+/* ---- test cases ----------------------------------------------------- */
+async function renderCases() {
+  const root = $('#cases');
+  if (!S.cat) S.cat = await api('/api/testcases');
+  const q = (S.caseQ || '').toLowerCase();
+  const fams = S.cat.families.filter(f => !q || JSON.stringify(f).toLowerCase().includes(q));
+  root.innerHTML = `
+  <div class="row"><input type="text" id="cQ" placeholder="Filter (e.g. slow, tc, H4)" value="${esc(S.caseQ || '')}" style="min-width:260px">
+    <span class="muted">T = public tests · H = hidden-test reconstruction · BA = before/after ablations. Suffixes: s = slow %, m = read delay ms, p = disconnect %, d = disconnect s, l = late join s, c = clients.</span></div>
+  <div class="grid">${fams.map(f => `
+    <div class="card"><h2>${esc(f.id)} — ${esc(f.title)}</h2>
+      <p style="margin:0 0 6px">${esc(f.what)}</p>
+      <p style="margin:0 0 10px"><b>Good result:</b> ${esc(f.good)}</p>
+      <div class="scroll" style="max-height:none"><table><thead><tr><th>Case</th><th>Workload</th><th>Arms</th><th>Results</th></tr></thead><tbody>
+      ${f.cases.map(c => `<tr data-id="${c.id}"><td><b>${c.id}</b>${c.needs_tc ? ' <span class="badge SKIP">tc</span>' : ''}${c.informational ? ' <span class="badge SKIP">info</span>' : ''}</td>
+        <td style="white-space:normal">${esc(c.workload)}</td><td>${c.arms.join(', ')}</td><td>${badge(verdictFor(c.id))}</td></tr>`).join('')}
+      </tbody></table></div></div>`).join('') || '<div class="card empty">No matches</div>'}
+    <div class="card"><h2>Arms</h2><table>${Object.entries(S.cat.arms).map(([a, d]) => `<tr><td><b>${a}</b></td><td style="white-space:normal">${esc(d)}</td></tr>`).join('')}</table></div>
+  </div>`;
+  $('#cQ').oninput = e => {S.caseQ = e.target.value; renderCases().then(() => {const i = $('#cQ'); i.focus(); i.setSelectionRange(i.value.length, i.value.length);});};
+  root.querySelectorAll('tbody tr').forEach(tr => tr.onclick = () => {S.sel = tr.dataset.id; S.arm = 'final'; S.run = 1; tab('detail');});
 }
 
 /* ---- run ------------------------------------------------------------ */

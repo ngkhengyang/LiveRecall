@@ -27,6 +27,7 @@ ROOT = HERE.parent
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(HERE))
 from scenarios import SCENARIOS  # noqa: E402
+import testcases  # noqa: E402
 
 OUTPUT = ROOT / "output"
 VENV_PYTHON = ROOT / "venv/bin/python"
@@ -292,6 +293,8 @@ class Handler(BaseHTTPRequestHandler):
                         "tc_note": "tc scenarios need sudo + netem",
                     }
                 )
+            elif url.path == "/api/testcases":
+                self.json({"families": testcases.payload(), "arms": testcases.ARMS})
             elif url.path == "/api/results":
                 self.json(results_payload(safe_out(q.get("out", "output/experiments"))))
             elif url.path == "/api/detail":

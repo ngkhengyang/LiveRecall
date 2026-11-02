@@ -8,6 +8,34 @@ Three suites share the supplied analyser and store independent runs plus medians
 The current catalog has 52 scenarios / 87 scenario-arm cases, before reuse.
 Thresholds are our own engineering targets, not the hidden evaluator's thresholds.
 
+## H scenario index
+
+List the exact scenario IDs with:
+```bash
+./venv/bin/python experiments/run_matrix.py --suite hidden --list
+```
+
+These are locally defined stress scenarios. Full settings are below; `--quick`
+reduces client counts, durations, and event timings.
+
+| Group | What it tests |
+|---|---|
+| `H_base` | Unimpaired control: 100 clients, 60 seconds |
+| `H1_cN` | Scaling to N = 250, 500, or 1,000 clients |
+| `H2_sP_mMS` | P = 10/30/50% slow readers, each waiting MS = 100/250/500/1,000 ms per caption frame |
+| `H3_RATE` | Constrained bandwidth at 2 Mbit/s, 1 Mbit/s, or 512 kbit/s; requires tc |
+| `H4_pP_dD` | P = 50/100% disconnect for D = 2/10/30/70 seconds; 70-second cases are informational |
+| `H5_lS` | 20% of clients join S = 10/30 seconds late |
+| `H6` | Rapid revisions: 20 ms between revisions, 50 ms between segments |
+| `H7_PROFILE` | Freshness under delay/loss network profiles; requires tc |
+| `H8_bandwidth`, `H8_slow` | Convergence after temporary bandwidth or slow-reader impairment ends |
+| `H9` | Five-minute memory-growth observation with 30% slow readers |
+| `H10` | Six protocol and recovery invariant checks |
+| `H11` | Combined stress: 500 clients, rapid revisions, delay/loss, slow readers, and reconnects; requires tc |
+
+For example, `H2_s10_m1000` means 10% slow readers waiting 1,000 ms per frame.
+Exact settings and engineering targets are in `experiments/scenarios.py`.
+
 On Ubuntu or WSL, from the repo root:
 ```bash
 python3 -m venv venv
