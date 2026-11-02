@@ -85,35 +85,46 @@ source/client wall clocks.
 
 ## 3. Backpressure and overload policy
 
-Each client has an independent sender and an `OutboundBuffer` keyed by segment.
-Replacing a pending entry coalesces superseded provisional revisions without
-changing its FIFO position. When the sender drains between revisions, every
-update is forwarded. A blocked socket stalls its own sender; broadcast only
-enqueues, preserving other clients' independent progress.
+Each client has an independent sender and an `OutboundBuffer` that preserves
+every revision in FIFO arrival order during normal operation, including bursts
+received before the sender runs. Detected client lag or queue pressure enables
+semantic compaction: superseded provisional revisions are removed while each
+segment's final or latest active revision keeps its original queue position and
+enqueue age. A blocked socket stalls its own sender; broadcast only enqueues,
+preserving other clients' independent progress.
 
 `Client._probe_loop()` keeps one ping outstanding, pausing 250 ms after each
 completed probe. Timely pongs update a smoothed RTT estimate with weight 0.25.
-A pong overdue by `max(0.5 s, 6 * RTT)` activates catch-up for three seconds.
+A pong overdue by `max(0.5 s, 6 * RTT)` activates catch-up, refreshed while the
+pong remains outstanding. After a late pong, coalescing continues for at least
+three seconds or its measured delay, whichever is longer, allowing downstream
+backlog to drain before full revision delivery resumes.
 Pong delay provides an indirect lag signal when socket buffers hide a slow
 reader; network delay can also trigger it. During catch-up, sending waits for
-the next completed probe or at most 0.5 seconds per hold. Finals take priority;
+the next completed probe or at most 0.5 seconds before draining a backlog,
+rather than before every individual update. Finals take priority;
 provisional-only backlog waits until its oldest entry has been queued for one
-second, allowing newer revisions to replace it. After catch-up expires, ordinary
-FIFO delivery resumes without deliberate holds or provisional grace.
+second, allowing newer revisions to replace it. After four finals, a ready
+active revision gets a turn. After catch-up expires and any
+queue-pressure backlog drains, full-update FIFO delivery resumes.
 
-The pending-segment target is 256. Overflow evicts the oldest pending provisional.
-If all 257 entries are final, the buffer stops accepting updates and requests
-closure with code 1013 instead of evicting a final. One in-flight send and
-WebSocket/TCP buffers lie outside this count; it is not a total byte bound.
-A pong still outstanding at `max(1.5 s, 18 * RTT)` also triggers closure.
+The soft threshold is 256 pending updates; crossing it or exceeding the byte
+budget activates compaction until the backlog drains. Hard
+limits are 4096 pending finals, 4000 active segments and 4 MiB of pending JSON.
+If useful state still exceeds these limits after compaction, the buffer stops
+accepting updates and requests closure with code 1013. Active segments are not
+evicted to make room. Live delivery always uses individual `CAPTION_UPDATE`
+messages; `HISTORY` is reserved for the response to `CLIENT_HELLO`. One in-flight
+send and WebSocket/TCP buffers lie outside the pending limits. Pong lag alone
+does not force a reconnect for history catch-up; WebSocket keepalive still
+closes connections that stop responding.
 
 Reconnect requests recent finals through `HISTORY`, avoiding individual replay
 of obsolete revisions. Recovery remains limited to the requested window; closure
-does not guarantee every queued final is recoverable. Extreme overflow can also
-evict an active segment's only pending revision, so latest-active-state delivery
-is not guaranteed in that case. The policy aims for rapid convergence after
-temporary pressure, while sustained overload and lag-detection accuracy require
-the experiments in Section 4; implementation alone does not establish performance.
+does not guarantee every queued final is recoverable. The policy aims for rapid
+convergence after temporary pressure, while sustained overload and lag-detection
+accuracy require the experiments in Section 4; implementation alone does not
+establish performance.
 
 ## 4. Public experiments and results
 
@@ -172,7 +183,7 @@ TODO: Select at least one public stress test and compare the final design with a
 | TODO: final completeness | TODO | TODO | TODO |
 | TODO: coverage or resource metric | TODO | TODO | TODO |
 
-TODO: Explain the mechanism behind the measured difference and its cost. Quantify the improvement or regression without sacrificing correctness or concealing reduced coverage. 
+TODO: Explain the mechanism behind the measured difference and its cost. Quantify the improvement or regression without sacrificing correctness or concealing reduced coverage.
 
 ## 6. Discussion, limitations and future work
 

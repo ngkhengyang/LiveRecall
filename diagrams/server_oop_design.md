@@ -176,45 +176,44 @@ send; it never sends anything itself. Takes an injectable `clock` so the grace-w
 behavior below is testable without real time passing.
 
 **Attributes**
-- `self._pending: dict[int, CaptionUpdate]` — keyed by segment, insertion-ordered.
-- `self._queued_at: dict[int, float]` — when each segment first entered the buffer.
-- `MAX_PENDING_SEGMENTS = 256` — the explicit bound backing "boundedness is part of
-  correctness".
+- `self._pending: dict[int, CaptionUpdate]` — keyed by an increasing queue ID,
+  insertion-ordered. Multiple revisions of one segment coexist in normal mode.
+- `self._queued_at: dict[int, float]` — the enqueue time for each queue ID.
+- `self._by_segment: dict[int, int]` — segment-to-queue-ID index used only while
+  coalescing; each segment then has exactly one pending entry.
+- `MAX_PENDING_UPDATES = 256` — soft backlog threshold activating compaction
+  until the queue drains.
+- Hard bounds: 4096 pending finals, 4000 active segments and 4 MiB pending JSON.
 - `self._should_close`, exposed as the public read-only `should_close` property.
 
 **Public methods**
-- `offer(update)` — `self._pending[update.segment] = update`, then enforce the bound.
-- `has_pending()`, and the `pending` / `coalesced` / `dropped` counters (printed on
-  disconnect; they are how we observed the behavior described below).
+- `set_overloaded(bool)` — applies the client's lag verdict, compacting an existing
+  backlog when lag starts. When lag clears, new revisions are preserved individually
+  unless queue pressure remains active.
+- `offer(update)` — append every revision normally; replace a superseded revision
+  only during overload. Check hard limits after any pressure-triggered compaction.
+- `has_pending()`, and the `pending` / `pending_bytes` / `coalesced` / `rejected`
+  counters (coalesced/rejected counts are printed on disconnect).
 - `next_update(prefer_final=False, provisional_grace=0.0) -> CaptionUpdate | None` —
   see "Slow readers" for why the two arguments exist.
 
 **Private helper**
-- `_enforce_bound()` — evict the oldest **non-final** entry. If every pending entry is
-  already final, do **not** drop a final to make room — set `_should_close` instead,
-  forcing a reconnect that re-syncs through `compute_history`.
+- `_compact()` — discard only superseded provisional revisions, retaining each
+  segment's final or newest active revision at its original position and enqueue age.
 
-**Why `dict[int, CaptionUpdate]` is the right shape** (over a list+index-map or
-`asyncio.Queue`):
-- Python dicts preserve insertion order, and **re-assigning an existing key does not move
-  its position**. So `offer()` simultaneously (a) coalesces a superseded provisional for a
-  segment already queued, (b) preserves its original arrival-order slot for FIFO draining,
-  and (c) needs no separate cleanup/index bookkeeping.
-- It never needs to compare revision numbers — `CaptionStore` has already validated
-  monotonicity and final-durability before anything reaches `offer()`, so an
-  unconditional overwrite is always correct.
-- Coalescing is **emergent, not heuristic**: when the client is keeping up, each entry is
-  drained before the next revision for that segment arrives, so every revision is
-  delivered individually and Normal Update Coverage stays at 100%. There is no "is this
-  client slow" branch *inside this class* to get wrong.
-- Finals are never silently dropped: once an entry is final, nothing ever writes that key
-  again, so it just waits its turn.
-
-**Changed during implementation — `offer()` stops accepting work after `should_close`.**
-Originally the bound was only enforced inside `_enforce_bound`, so once the close flag
-was set the dict kept growing while the sender task was still blocked. Unit test: with
-`MAX_PENDING_SEGMENTS = 3` and 200 offered finals, `pending` settled at 4 rather than
-climbing. Everything dropped there is durable in the server's history.
+**Why the normal and overload paths differ**:
+- Normal arrivals get distinct queue IDs, so a fast burst cannot overwrite unsent
+  revisions before the sender runs. Global arrival order is preserved.
+- During overload, the segment index allows replacement in constant time without
+  moving the retained queue slot or restarting its provisional grace period.
+- `CaptionStore` validates revision monotonicity and final durability before enqueue,
+  so compaction can retain the last accepted state of each segment safely.
+- Once a pressure backlog drains and client lag clears, normal full-update delivery
+  resumes automatically. All live deliveries remain individual `CAPTION_UPDATE`s.
+- Hard overflow requests explicit closure instead of evicting a final or the latest
+  active state. Subsequent offers are rejected while the sender closes. Recovery is
+  limited to the requested recent-history window; it cannot guarantee arbitrarily
+  old unsent finals after closure.
 
 ## `Server`
 
@@ -347,44 +346,37 @@ indistinguishable from a healthy one during that window.
 
 ## What the `Client` does about it
 
-Four mechanisms, in the order they engage:
+Three mechanisms, in the order they engage:
 
 1. **Detect** — `_probe_loop()` keeps exactly one ping in flight (`PROBE_INTERVAL_SECONDS
    = 0.25`). One overdue pong raises catch-up for `CATCHUP_STICKY_SECONDS = 3.0`. Only
-   this task sends pings, so there is never more than one outstanding no matter how far
-   behind the client gets.
+   this task sends consumption probes. While that pong remains overdue, catch-up is
+   refreshed every 0.5 seconds without issuing more probes or forcing a reconnect.
+   After a late pong, catch-up lasts at least three seconds or that pong's measured
+   delay, whichever is longer, so downstream backlog has time to drain.
 2. **Hold** — while in catch-up, `_hold()` waits for the next completed probe (capped by
-   `MAX_HOLD_SECONDS = 0.5`) *before each send*. **This is what creates the backlog**, and
-   therefore what finally makes the coalescing in `OutboundBuffer` execute. A client that
-   is keeping up never holds, so normal clients pay nothing.
+   `MAX_HOLD_SECONDS = 0.5`) once before draining a backlog. Updates coalesce during
+   the hold; individual finals do not each incur a separate wait. A client that
+   is keeping up never holds.
 3. **Prioritize** — `next_update(prefer_final=True,
    provisional_grace=PROVISIONAL_GRACE_SECONDS = 1.0)` takes the
    oldest *final* ahead of any provisional, and withholds a lone provisional for 1 s.
    Under the deterministic source a segment finalizes in ~0.4 s, so the provisional is
    normally replaced in place by its own final and one message carries what three would
    have. Nothing is discarded: a segment that genuinely stays open past the grace is
-   released on the next call, satisfying "preserve the newest relevant revision of an
-   active segment".
-4. **Resync** — a pong still outstanding past `_resync_threshold()` means the reader has
-   stopped draining entirely. Close with 1013; the client's own reconnect returns every
-   missed final in **one** HISTORY message. For a reader consuming two messages a second,
-   that is the difference between converging and never catching up — it is also exactly
-   the spec's "rapid convergence after overload", and `test/load_clients.py` reconnects
-   automatically.
+   released once ready. After four finals, a ready active revision gets a turn.
+   `HISTORY` is sent only in response to `CLIENT_HELLO`; live catch-up uses
+   individual `CAPTION_UPDATE`s. Hard buffer overflow and WebSocket keepalive
+   retain their connection-failure behavior.
 
-Thresholds for (1) and (4) are scaled against each connection's own smoothed RTT
-(`BEHIND_RTT_MULTIPLIER = 6`, `RESYNC_RTT_MULTIPLIER = 18`, with floors
-`BEHIND_AFTER_SECONDS = 0.5` and `RESYNC_AFTER_SECONDS = 1.5`), so a
-link with real delay is judged against what is normal *for that link*. The supplied
-`network_profiles/delay_loss.sh` alone is 120 ms ± 30 ms with 3% loss; a fixed 1.5 s
-threshold would read that as a stalled reader. Measured thresholds:
-
-| link | baseline RTT | "behind" after | "resync" after |
-|---|---|---|---|
-| loopback | 0.5 ms | 500 ms (floor) | 1500 ms (floor) |
-| netem 120 ms ± 30 ms | 250 ms | 1500 ms | 4500 ms |
+The lag threshold is `max(0.5 s, 6 * smoothed RTT)`, so a link with real delay
+is judged against what is normal for that link.
 
 ## Honest attribution — what actually moved the number
+
+**Historical measurements below predate the live-delivery protocol correction.**
+The old routine resync policy has been removed; these results do not validate
+the current implementation and must be rerun for the report.
 
 Each step was measured on T3 (100 clients, 10% slow at 500 ms, 60 s). Not every idea paid
 off, and the table matters more than the narrative:
@@ -405,13 +397,14 @@ their own terms and cost nothing, but they did not earn the number. Sticky catch
 *hurt* in isolation, and only became useful once resync existed to stop a stalled reader
 draining a stale queue.
 
-**Known risk:** `RESYNC_AFTER_SECONDS` is the most sensitive constant in the system —
-4.0 s gives 98.8%, 1.5 s gives 99.99%. It is the one value fitted against the public test,
-so it should be re-checked rather than trusted if the hidden workload behaves differently.
+The historical resync results relied on reconnect recovery and are not a basis
+for tuning the current live-delivery policy.
 
 ---
 
 ## Measured results (public tests, 1 run each; use `--runs 3` for the report)
+
+These are also historical results from before the protocol correction.
 
 | | Duplicates | Stale | Final completeness | Normal Update Coverage | P50 | P95 |
 |---|---|---|---|---|---|---|

@@ -53,7 +53,7 @@ class Client:
 
     # Gap between consumption probes.
     PROBE_INTERVAL_SECONDS = 0.25
-    # Floors for the two verdicts below. Both are also scaled against this
+    # The lag threshold is also scaled against this
     # connection's own measured round trip, so a link with real delay and
     # jitter is judged against what is normal *for that link* rather than
     # against a loopback constant. The supplied impairment profile alone is
@@ -63,29 +63,20 @@ class Client:
     # Upper bound on one hold. A client that never recovers still makes
     # forward progress on finals instead of stalling outright.
     MAX_HOLD_SECONDS = 0.5
-    # How long one overdue pong keeps this client in catch-up mode. A reader
+    # Minimum catch-up time after an overdue pong. A reader
     # that is behind drains just enough to answer a ping and then falls back,
     # so without a sticky window the sender resumes flooding the moment a
     # single pong lands and the client spends its read budget on revisions
     # that are obsolete by the time it reaches them.
     CATCHUP_STICKY_SECONDS = 3.0
-    # A pong still outstanding this long means the reader has stopped draining
-    # altogether and is sitting on a queue of revisions that are already
-    # obsolete. Closing is faster than feeding it: every final it missed is in
-    # the server's bounded history, so its own reconnect returns the whole set
-    # in a single HISTORY message instead of one message per final -- which,
-    # for a reader consuming two messages a second, is the difference between
-    # converging now and never catching up at all.
-    RESYNC_AFTER_SECONDS = 1.5
     BEHIND_RTT_MULTIPLIER = 6.0
-    RESYNC_RTT_MULTIPLIER = 18.0
     RTT_SMOOTHING = 0.25
     # While behind, hold a lone provisional revision this long before sending
     # it. The deterministic source finalizes a segment in about 0.4 s, so the
     # revision is normally replaced in place by its own final and one message
     # carries what three would have.
     PROVISIONAL_GRACE_SECONDS = 1.0
-    MAX_FINAL_BATCHES_BEFORE_ACTIVE = 4
+    MAX_FINALS_BEFORE_ACTIVE = 4
 
     def __init__(self, ws, hello: ClientHello, server: "Server") -> None:
         self.ws = ws
@@ -97,17 +88,12 @@ class Client:
         self._catchup_until = 0.0
         self._rtt = 0.0
         self._held = 0
-        self._batches_sent = 0
-        self._batched_finals = 0
-        self._final_batches_since_active = 0
-        self._in_flight: CaptionUpdate | History | None = None
+        self._finals_since_active = 0
+        self._in_flight: CaptionUpdate | None = None
         self._tasks: list[asyncio.Task] = []
 
     def _behind_threshold(self) -> float:
         return max(self.BEHIND_AFTER_SECONDS, self.BEHIND_RTT_MULTIPLIER * self._rtt)
-
-    def _resync_threshold(self) -> float:
-        return max(self.RESYNC_AFTER_SECONDS, self.RESYNC_RTT_MULTIPLIER * self._rtt)
 
     @property
     def _catchup(self) -> bool:
@@ -156,8 +142,7 @@ class Client:
             print(
                 f"client disconnected: id={self.hello.client_id}; "
                 f"coalesced={self._buffer.coalesced}; rejected={self._buffer.rejected}; "
-                f"held={self._held}; batches={self._batches_sent}; "
-                f"batched_finals={self._batched_finals}; clients={self.server.client_count}",
+                f"held={self._held}; clients={self.server.client_count}",
                 flush=True,
             )
 
@@ -185,6 +170,7 @@ class Client:
         Called from ``Server.broadcast``. It only mutates in-memory buffer
         state, so a stalled reader here cannot delay any other client.
         """
+        self._buffer.set_overloaded(self._catchup)
         self._buffer.offer(update)
         self._wake.set()
 
@@ -198,19 +184,13 @@ class Client:
                 # sets the event, so an enqueue racing this clear is still seen
                 # by the has_pending check below.
                 self._wake.clear()
+                if self._catchup:
+                    # Hold once per drain, so individual finals have no fixed rate cap.
+                    await self._hold()
 
                 while self._buffer.has_pending():
                     if self._buffer.should_close:
                         break
-                    if self._catchup:
-                        # Pace to this client's measured round trip: one
-                        # message per completed probe. While the hold runs,
-                        # newer revisions overwrite superseded ones in place,
-                        # so what goes out next is the freshest state rather
-                        # than the head of a stale queue.
-                        await self._hold()
-                        if self._buffer.should_close or not self._buffer.has_pending():
-                            break
                     delivery = self._next_delivery()
                     if delivery is None:
                         # Only a still-fresh provisional is waiting. Leave it
@@ -222,9 +202,6 @@ class Client:
                     self._in_flight = delivery
                     await self.ws.send(delivery.to_json())
                     self._in_flight = None
-                    if isinstance(delivery, History):
-                        self._batches_sent += 1
-                        self._batched_finals += len(delivery.items)
 
                 if self._buffer.should_close:
                     await self.ws.close(
@@ -234,26 +211,26 @@ class Client:
         except ConnectionClosed:
             return
 
-    def _next_delivery(self) -> CaptionUpdate | History | None:
-        """Batch unsent finals only during catch-up or actual queue pressure."""
+    def _next_delivery(self) -> CaptionUpdate | None:
+        """Prioritize finals during catch-up; live traffic is CAPTION_UPDATE only."""
+        # Lag can change while updates are already queued. Compact that backlog
+        # on entry to catch-up, and preserve new revisions once lag clears.
+        self._buffer.set_overloaded(self._catchup)
         catching_up = self._catchup or self._buffer.pressured
-        if catching_up:
-            # Continuing final batches must not starve active segments.
-            if self._final_batches_since_active >= self.MAX_FINAL_BATCHES_BEFORE_ACTIVE:
-                active = self._buffer.take_active_update(self.PROVISIONAL_GRACE_SECONDS)
-                if active is not None:
-                    self._final_batches_since_active = 0
-                    return active
-            items = self._buffer.take_final_batch()
-            if items:
-                self._final_batches_since_active += 1
-                return History(items)
+        if catching_up and self._finals_since_active >= self.MAX_FINALS_BEFORE_ACTIVE:
+            active = self._buffer.take_active_update(self.PROVISIONAL_GRACE_SECONDS)
+            if active is not None:
+                self._finals_since_active = 0
+                return active
         delivery = self._buffer.next_update(
             prefer_final=catching_up,
             provisional_grace=self.PROVISIONAL_GRACE_SECONDS,
         )
-        if delivery is not None and not delivery.final:
-            self._final_batches_since_active = 0
+        if delivery is not None:
+            if catching_up and delivery.final:
+                self._finals_since_active += 1
+            else:
+                self._finals_since_active = 0
         return delivery
 
     async def _hold(self) -> None:
@@ -268,10 +245,9 @@ class Client:
     async def _probe_loop(self) -> None:
         """Keep exactly one ping in flight and publish the verdict.
 
-        One overdue pong puts this client in catch-up mode for the next few
-        seconds; the window simply expires if the client keeps answering
-        promptly. Only this task sends pings, so there is never more than one
-        outstanding no matter how far behind the client gets.
+        One overdue pong keeps catch-up active until it arrives, followed by
+        a drain window based on its delay. Timely probes let the window expire.
+        This task keeps only one consumption probe outstanding.
         """
         try:
             while True:
@@ -286,27 +262,25 @@ class Client:
                 except asyncio.TimeoutError:
                     # Overdue: stop pushing, then keep waiting on this pong
                     # rather than issuing another ping behind it.
-                    loop = asyncio.get_running_loop()
-                    self._catchup_until = loop.time() + self.CATCHUP_STICKY_SECONDS
-                    self._wake.set()
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(pong),
-                            timeout=max(
-                                0.0,
-                                self._resync_threshold() - self._behind_threshold(),
-                            ),
+                    while True:
+                        self._catchup_until = (
+                            asyncio.get_running_loop().time()
+                            + self.CATCHUP_STICKY_SECONDS
                         )
-                    except asyncio.TimeoutError:
-                        print(
-                            f"client resync: id={self.hello.client_id}; "
-                            "reader stalled, closing for history catch-up",
-                            flush=True,
-                        )
-                        await self.ws.close(
-                            self.TOO_FAR_BEHIND, "resynchronize via history"
-                        )
-                        return
+                        self._wake.set()
+                        try:
+                            latency = await asyncio.wait_for(
+                                asyncio.shield(pong), timeout=self.MAX_HOLD_SECONDS
+                            )
+                            # Let downstream backlog drain before resuming revisions.
+                            if isinstance(latency, (int, float)):
+                                self._catchup_until = (
+                                    asyncio.get_running_loop().time()
+                                    + max(self.CATCHUP_STICKY_SECONDS, latency)
+                                )
+                            break
+                        except asyncio.TimeoutError:
+                            continue
                 self._probe_tick.set()
                 self._wake.set()
                 await asyncio.sleep(self.PROBE_INTERVAL_SECONDS)
