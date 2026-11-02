@@ -41,8 +41,10 @@ class Server:
             self._host,
             self._port,
             max_size=2**20,
-            ping_interval=20,
-            ping_timeout=20,
+            # Each receiver owns a bounded probe that includes ping initiation.
+            # A second built-in heartbeat could terminate supported catch-up
+            # before the application's finite delivery-stall budget expires.
+            ping_interval=None,
         ):
             print(
                 f"LiveRecall server listening on ws://{self._host}:{self._port}",
@@ -113,6 +115,26 @@ class Server:
         self, last_segment: int, last_revision: int, history_seconds: float = 60.0
     ) -> list[CaptionUpdate]:
         return self._store.compute_history(last_segment, last_revision, history_seconds)
+
+    def history_snapshot(
+        self, last_segment: int, last_revision: int, history_seconds: float = 60.0
+    ) -> tuple[list[CaptionUpdate], int]:
+        """Capture recent context and its final-log boundary without yielding."""
+        return self._store.history_snapshot(
+            last_segment, last_revision, history_seconds
+        )
+
+    @property
+    def final_tail(self) -> int:
+        return self._store.final_tail
+
+    def final_sequence(self, update: CaptionUpdate) -> int:
+        return self._store.final_sequence(update)
+
+    def read_final_batch(
+        self, after_sequence: int, max_items: int, max_bytes: int
+    ) -> tuple[list[CaptionUpdate], int]:
+        return self._store.read_final_batch(after_sequence, max_items, max_bytes)
 
     def ingest_caption_update(self, update: CaptionUpdate) -> None:
         """Called by ``Source``. Broadcasts only genuinely new state."""

@@ -20,11 +20,14 @@ ever seeing the same final twice.
 from __future__ import annotations
 
 import time
-from collections import deque
 from dataclasses import dataclass
 from typing import Callable
 
-from .protocol import CaptionUpdate
+from .protocol import CaptionUpdate, History
+
+
+class ReplayExpired(Exception):
+    """A connected receiver's outstanding finals exceeded shared retention."""
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,7 @@ class SegmentState:
 
     update: CaptionUpdate
     received_at: float
+    final_sequence: int = 0
 
     @property
     def segment(self) -> int:
@@ -69,7 +73,12 @@ class CaptionStore:
         self._clock = clock
         self._segments: dict[int, SegmentState] = {}
         self._active_segments: set[int] = set()
-        self._final_history: deque[SegmentState] = deque()
+        # Accepted finals have contiguous sequence numbers independent of the
+        # source's segment IDs. Dict insertion order preserves acceptance order;
+        # sequence lookup also lets each receiver read just its next batch.
+        self._final_history: dict[int, SegmentState] = {}
+        self._final_tail = 0
+        self._evicted_final_sequence = 0
         # Segments below this watermark have been evicted from the bounded
         # history. Rejecting them keeps a stale revision for a long-forgotten
         # segment from being re-accepted once its state has been reclaimed.
@@ -94,12 +103,18 @@ class CaptionStore:
             if update.revision <= existing.revision:
                 return None
 
-        state = SegmentState(update=update, received_at=self._clock())
+        if update.final:
+            self._final_tail += 1
+        state = SegmentState(
+            update=update,
+            received_at=self._clock(),
+            final_sequence=self._final_tail if update.final else 0,
+        )
         self._segments[update.segment] = state
 
         if update.final:
             self._active_segments.discard(update.segment)
-            self._final_history.append(state)
+            self._final_history[state.final_sequence] = state
             self._trim_history()
         else:
             self._active_segments.add(update.segment)
@@ -113,7 +128,7 @@ class CaptionStore:
     ) -> list[CaptionUpdate]:
         """Finalized captions newer than the client's latest finalized state.
 
-        Ordered oldest to newest (the deque is in append order). Only finals
+        Ordered oldest to newest (the log is in acceptance order). Only finals
         are ever returned, which is what the resume contract requires.
 
         Expire history even when the source is idle. The requested window is
@@ -128,16 +143,88 @@ class CaptionStore:
         marker = (last_segment, last_revision)
         return [
             state.update
-            for state in self._final_history
+            for state in self._final_history.values()
             if state.received_at >= cutoff and (state.segment, state.revision) > marker
         ]
+
+    def history_snapshot(
+        self, last_segment: int, last_revision: int, history_seconds: float = 60.0
+    ) -> tuple[list[CaptionUpdate], int]:
+        """Capture requested context and its live-subscription boundary together.
+
+        All methods here are synchronous. A caller registering immediately
+        before this call can send HISTORY, then replay only finals accepted
+        after this watermark. An empty or zero-second context request must not
+        cause older, intentionally unrequested finals to replay as live work.
+        """
+        items = self.compute_history(last_segment, last_revision, history_seconds)
+        return items, self._final_tail
+
+    @property
+    def final_tail(self) -> int:
+        """Sequence of the last accepted final, including already expired ones."""
+        return self._final_tail
+
+    def final_sequence(self, update: CaptionUpdate) -> int:
+        """Find a retained accepted final's sequence before starting its send.
+
+        The sender can retain this small sequence alongside an in-flight
+        message and commit its cursor only after sending succeeds. Looking the
+        sequence up after a long send may fail because retention kept advancing.
+        """
+        self._trim_history()
+        state = self._segments.get(update.segment)
+        if state is None or not state.final or state.update != update:
+            raise ReplayExpired(f"Final for segment {update.segment} is not retained")
+        return state.final_sequence
+
+    def read_final_batch(
+        self, after_sequence: int, max_items: int, max_bytes: int
+    ) -> tuple[list[CaptionUpdate], int]:
+        """Read a connected receiver's next bounded prefix of outstanding finals.
+
+        This is continuous delivery from the shared 90-second log, independent
+        of the requested reconnect-context window. Expired outstanding prefixes
+        raise even when the log is empty; they must never be skipped silently.
+        Byte accounting includes HISTORY framing and item separators. One item
+        larger than the batch budget is returned alone so the sender can fall
+        back to an ordinary CAPTION_UPDATE without starving that final.
+        """
+        if max_items <= 0 or max_bytes <= 0:
+            raise ValueError("Final batch limits must be positive")
+        self._trim_history()
+        if after_sequence < self._evicted_final_sequence:
+            raise ReplayExpired(
+                f"Final replay after sequence {after_sequence} expired through "
+                f"{self._evicted_final_sequence}"
+            )
+        items: list[CaptionUpdate] = []
+        next_sequence = after_sequence
+        size = len(History().to_json())
+        stop = min(self._final_tail, after_sequence + max_items)
+        for sequence in range(after_sequence + 1, stop + 1):
+            update = self._final_history[sequence].update
+            item_size = len(update.to_json()) + (2 if items else 0)
+            if items and size + item_size > max_bytes:
+                break
+            items.append(update)
+            size += item_size
+            next_sequence = sequence
+            if size > max_bytes:
+                break
+        return items, next_sequence
 
     # -- bounds ---------------------------------------------------------
 
     def _trim_history(self) -> None:
         cutoff = self._clock() - self.HISTORY_HORIZON_SECONDS
-        while self._final_history and self._final_history[0].received_at < cutoff:
-            evicted = self._final_history.popleft()
+        while self._final_history:
+            sequence = self._evicted_final_sequence + 1
+            evicted = self._final_history[sequence]
+            if evicted.received_at >= cutoff:
+                break
+            del self._final_history[sequence]
+            self._evicted_final_sequence = sequence
             self._retire(evicted.segment)
 
     def _trim_segments(self) -> None:
