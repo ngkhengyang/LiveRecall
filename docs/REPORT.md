@@ -71,10 +71,14 @@ skipping a prefix that has expired.
 Recovery returns only finals with a greater tuple, oldest first under the supplied
 sequential source. A late join uses `(0, 0)`. Registration and
 `history_snapshot()` execute without an intervening `await`, capturing requested
-items and the final-log tail together. Only after `HISTORY` is sent successfully
-does the connection initialize its delivery cursor to that captured tail and
-start its sender. Finals arriving during the send lie after the boundary;
-empty or zero-second context does not replay older unrequested finals. The
+items and the final-log tail together. Recovery is split into ordered `HISTORY`
+messages targeting at most 64 captions and 256 KiB of complete JSON per message.
+A caption exceeding the byte target travels alone and must still fit the peer's
+message limit; empty context produces one empty `HISTORY`. Only after all
+snapshot messages are sent successfully does the connection initialize its
+delivery cursor to that captured tail and start its sender. Finals arriving
+during the send lie after the boundary; empty or zero-second context does not
+replay older unrequested finals. The
 cursor advances only after successful sends and is not an application ACK.
 Persistent reconnect delivery sessions and application acknowledgements are
 not implemented; a genuine reconnect still uses the client's recent-context
