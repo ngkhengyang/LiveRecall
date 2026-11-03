@@ -46,8 +46,6 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
 # ==========================================================================
 # Mode
 # ==========================================================================
-
-
 class Mode(Enum):
     """How a client is being served.
 
