@@ -102,6 +102,9 @@ class LagPolicy:
     MAX_CATCHUP_SECONDS = 30.0
 
     def __init__(self) -> None:
+        """Called by: Client.__init__ (one LagPolicy per client).
+        Does: Starts with no RTT, no catch-up window and the 3 s lease.
+        """
         self.rtt = 0.0
         self.catchup_until = 0.0
         self.catchup_lease = self.CATCHUP_STICKY_SECONDS
@@ -109,18 +112,35 @@ class LagPolicy:
         self.normal_trial_started: float | None = None
 
     def behind_threshold(self) -> float:
-        """A pong later than this means the client is behind."""
+        """Called by: Client._probe_loop (start of each probe),
+            LagPolicy.probe_finished.
+        Does: Returns how late a pong may be before the client counts as behind.
+
+        A pong later than this means the client is behind.
+        """
         return max(self.BEHIND_AFTER_SECONDS, self.BEHIND_RTT_MULTIPLIER * self.rtt)
 
     def replay_threshold(self) -> float:
-        """Lag lasting longer than this switches finals to log replay."""
+        """Called by: Client._probe_loop (start of each probe).
+        Does: Returns how long lag must last before finals switch to log replay.
+
+        Lag lasting longer than this switches finals to log replay.
+        """
         return max(self.REPLAY_AFTER_SECONDS, self.REPLAY_RTT_MULTIPLIER * self.rtt)
 
     def in_catchup(self, now: float) -> bool:
+        """Called by: Client._catchup (every lag-dependent decision).
+        Does: Says whether the catch-up window is still open at `now`.
+        """
         return now < self.catchup_until
 
     def lag_started(self, now: float) -> None:
-        """A pong just became late. Back off if a normal trial failed quickly.
+        """Called by: Client._probe_loop, once when a pong first becomes late (and
+            Client._start_lag in tests).
+        Does: Doubles or resets the catch-up lease depending on how soon the lag came
+            back.
+
+        A pong just became late. Back off if a normal trial failed quickly.
 
         Prompt pongs during final-only replay don't prove capacity for every
         revision. Repeated failed normal trials earn a longer, bounded
@@ -141,13 +161,21 @@ class LagPolicy:
         self.normal_trial_started = None
 
     def still_lagging(self, now: float) -> None:
-        """The pong is still late: keep catch-up on for another lease."""
+        """Called by: Client._probe_loop, every 0.25 s while the pong stays late.
+        Does: Extends the catch-up window by one lease from `now`.
+
+        The pong is still late: keep catch-up on for another lease.
+        """
         self.catchup_until = now + self.catchup_lease
 
     def probe_finished(
         self, started: float, now: float, latency: object, was_late: bool
     ) -> None:
-        """Record how long a late probe took, and learn the RTT."""
+        """Called by: Client._probe_loop, after every completed probe.
+        Does: Records how long a late probe took and updates the smoothed RTT.
+
+        Record how long a late probe took, and learn the RTT.
+        """
         if was_late:
             self.last_lag_delay = now - started
         if isinstance(latency, (int, float)):
@@ -157,11 +185,19 @@ class LagPolicy:
             self.rtt += self.RTT_SMOOTHING * (sample - self.rtt)
 
     def start_normal_trial(self, now: float) -> None:
-        """The client just left replay; a quick relapse will lengthen the lease."""
+        """Called by: Client._leave_replay_if_caught_up.
+        Does: Remembers when the client returned to NORMAL, for the back-off rule.
+
+        The client just left replay; a quick relapse will lengthen the lease.
+        """
         self.normal_trial_started = now
 
     def stop(self) -> None:
-        """The connection is going away; never leave the sender in catch-up."""
+        """Called by: Client._probe_loop (finally), when the probe task ends.
+        Does: Closes the catch-up window so the sender is never left pacing.
+
+        The connection is going away; never leave the sender in catch-up.
+        """
         self.catchup_until = 0.0
 
 
@@ -188,13 +224,20 @@ class ReplayCursor:
     PROVISIONAL_GRACE_SECONDS = 1.0
 
     def __init__(self) -> None:
+        """Called by: Client.__init__ (one cursor per client).
+        Does: Starts at log position 0 with no finals sent since the last active.
+        """
         self.position = 0
         self.finals_since_active = 0
 
     def next_replay(
         self, buffer: OutboundBuffer, read_final_batch: ReadFinalBatch
     ) -> tuple[CaptionUpdate, int] | None:
-        """The next message while replaying, with the position it reaches.
+        """Called by: Client._next_delivery, once per message while in REPLAY.
+        Does: Picks the next replay message: the latest active after every 4 finals,
+            else the next final from the log, else the latest active, else nothing.
+
+        The next message while replaying, with the position it reaches.
 
         Returns None when there is nothing to send right now (log drained and
         no ready active segment). Raises ReplayExpired if the position has
@@ -233,6 +276,10 @@ class Client:
     PROBE_INTERVAL_SECONDS = 0.25
 
     def __init__(self, ws, hello: ClientHello, server: "Server") -> None:
+        """Called by: Server._accept, when a CLIENT_HELLO arrives.
+        Does: Creates this client's OutboundBuffer, LagPolicy, ReplayCursor and events;
+            starts in NORMAL.
+        """
         self.ws = ws
         self.hello = hello
         self.server = server
@@ -249,13 +296,22 @@ class Client:
 
     @property
     def mode(self) -> Mode:
+        """Called by: Readers and tests (not used by the delivery code).
+        Does: Reports NORMAL, COALESCING (NORMAL with an open catch-up window) or
+            REPLAY.
+        """
         if self._mode is Mode.NORMAL and self._catchup:
             return Mode.COALESCING
         return self._mode
 
     @property
     def _catchup(self) -> bool:
-        """True while a recently overdue pong still governs this client."""
+        """Called by: enqueue, _next_delivery, _window_full, _leave_replay_if_caught_up,
+            mode.
+        Does: Asks LagPolicy whether the catch-up window is open right now.
+
+        True while a recently overdue pong still governs this client.
+        """
         return self._lag.in_catchup(asyncio.get_running_loop().time())
 
     # ======================================================================
@@ -263,7 +319,12 @@ class Client:
     # ======================================================================
 
     async def run(self) -> None:
-        """Connect, send HISTORY, start the sender and probe, await disconnect."""
+        """Called by: Server._accept (awaited), once per connection.
+        Does: Registers, sends HISTORY, sets the cursor, starts the sender and probe
+            tasks, waits for disconnect, cleans up.
+
+        Connect, send HISTORY, start the sender and probe, await disconnect.
+        """
         # Register before the snapshot with no await in between. If the
         # snapshot came first, a final produced in the gap would never reach
         # this client. A final can't be in both: CaptionStore appends each
@@ -313,7 +374,11 @@ class Client:
             )
 
     def enqueue(self, update: CaptionUpdate) -> None:
-        """Hand this client one update. Never blocks, never awaits.
+        """Called by: Server.broadcast, for every caption the store accepts.
+        Does: Queues the update in the buffer (or drops a final in REPLAY), escalates to
+            replay on pressure, wakes the sender.
+
+        Hand this client one update. Never blocks, never awaits.
 
         Called from ``Server.broadcast``. It only touches in-memory buffer
         state, so a stalled reader cannot delay any other client.
@@ -332,7 +397,12 @@ class Client:
         self._wake.set()
 
     async def _sender_loop(self) -> None:
-        """The only task that sends live messages and moves the cursor."""
+        """Called by: Task started by run; runs for the whole connection.
+        Does: Waits for _wake, then picks, sends and commits messages one at a time,
+            pacing during catch-up.
+
+        The only task that sends live messages and moves the cursor.
+        """
         try:
             while True:
                 await self._wake.wait()
@@ -374,7 +444,12 @@ class Client:
             return
 
     def _next_delivery(self) -> tuple[CaptionUpdate, int] | None:
-        """Pick one message and the cursor it reaches; the sender commits it."""
+        """Called by: _sender_loop, once per message.
+        Does: Enters replay if needed, then picks the next message from ReplayCursor
+            (REPLAY) or the buffer (FIFO).
+
+        Pick one message and the cursor it reaches; the sender commits it.
+        """
         if self._mode is Mode.NORMAL and (self._catchup or self._buffer.pressured):
             self._enter_replay()
         if self._mode is Mode.REPLAY:
@@ -396,7 +471,11 @@ class Client:
         return delivery, through_sequence
 
     async def _send(self, delivery: CaptionUpdate | History) -> bool:
-        """One socket write, bounded by MAX_STALL_SECONDS."""
+        """Called by: run (HISTORY frames), _sender_loop (live frames).
+        Does: Writes one frame to the socket within 75 s, or closes the client.
+
+        One socket write, bounded by MAX_STALL_SECONDS.
+        """
         sending = asyncio.create_task(self.ws.send(delivery.to_json()))
         try:
             await _wait_task(sending, self.MAX_STALL_SECONDS)
@@ -412,6 +491,10 @@ class Client:
     # ======================================================================
 
     def _enter_replay(self) -> None:
+        """Called by: _escalate_to_replay, _next_delivery, _probe_loop.
+        Does: Switches to REPLAY (once) and drops the buffer's finals; the shared log
+            delivers them now.
+        """
         if self._mode is not Mode.REPLAY:
             self._mode = Mode.REPLAY
             self._buffer.drop_finals_keep_latest_active()
@@ -422,7 +505,12 @@ class Client:
         self._wake.set()
 
     def _escalate_to_replay(self, update: CaptionUpdate) -> None:
-        """enqueue found the buffer pressured or full after offering ``update``."""
+        """Called by: enqueue, when offer left the buffer pressured or full.
+        Does: Enters replay, then drops the update if it is a final or re-offers it if
+            it was refused.
+
+        enqueue found the buffer pressured or full after offering ``update``.
+        """
         refused = self._buffer.should_close
         self._enter_replay()
         if update.final:
@@ -431,7 +519,12 @@ class Client:
             self._buffer.offer(update)  # retry now that finals left the buffer
 
     def _leave_replay_if_caught_up(self) -> None:
-        """REPLAY -> NORMAL. No await between the check and the switch."""
+        """Called by: _next_delivery, when next_replay has nothing to send.
+        Does: Returns to NORMAL if there is no lag and the buffer is empty, with no
+            await in between.
+
+        REPLAY -> NORMAL. No await between the check and the switch.
+        """
         if not self._catchup and not self._buffer.has_pending():
             self._mode = Mode.NORMAL
             self._buffer.set_coalescing(False)
@@ -443,7 +536,11 @@ class Client:
     # ======================================================================
 
     async def _probe_loop(self) -> None:
-        """Time each whole probe and keep one round trip outstanding.
+        """Called by: Task started by run; runs for the whole connection.
+        Does: Pings every 0.25 s, feeds the timing to LagPolicy, enters replay on
+            lasting lag, closes after 75 s.
+
+        Time each whole probe and keep one round trip outstanding.
 
         Early deadlines turn on catch-up. The 75 s deadline is a terminal
         failure policy, independent of whether ping() has returned yet.
@@ -498,11 +595,19 @@ class Client:
             self._probe_tick.set()  # never leave the sender blocked in _hold
 
     async def _round_trip(self) -> float:
+        """Called by: _probe_loop, once per probe.
+        Does: Sends one ping and waits for its pong; returns the latency.
+        """
         pong = await self.ws.ping()
         return await pong
 
     def _window_full(self, sent_items: int, sent_bytes: int) -> bool:
-        """During catch-up, pause before each window of 64 items / 256 KiB."""
+        """Called by: _sender_loop, before each message.
+        Does: During catch-up, says whether to pause before the next window of 64 items
+            / 256 KiB.
+
+        During catch-up, pause before each window of 64 items / 256 KiB.
+        """
         return self._catchup and (
             sent_items == 0
             or sent_items >= self._buffer.MAX_BATCH_ITEMS
@@ -510,7 +615,11 @@ class Client:
         )
 
     async def _hold(self) -> None:
-        """Wait for the next completed probe; its stall deadline bounds this."""
+        """Called by: _sender_loop, during catch-up (tests may replace it).
+        Does: Waits until the probe task completes its next probe.
+
+        Wait for the next completed probe; its stall deadline bounds this.
+        """
         self._held += 1
         self._probe_tick.clear()
         await self._probe_tick.wait()
@@ -520,7 +629,12 @@ class Client:
     # ======================================================================
 
     async def _close(self, reason: str) -> None:
-        """Close with 1013, bounding the handshake; a dead peer may never read it."""
+        """Called by: _sender_loop, _send, _probe_loop.
+        Does: Closes the socket with 1013, aborting the transport if the handshake takes
+            over 2 s.
+
+        Close with 1013, bounding the handshake; a dead peer may never read it.
+        """
         closing = asyncio.create_task(self.ws.close(self.TOO_FAR_BEHIND, reason))
         try:
             await _wait_task(closing, self.CLOSE_TIMEOUT_SECONDS)
@@ -541,6 +655,10 @@ class Client:
     # Lag constants now live on LagPolicy; tests read and override them on
     # the client instance, so forward both reads and writes.
     def _forward_to_lag(name: str) -> property:  # noqa: N805 - class-body helper
+        """Called by: The class body below, at import time (test compatibility).
+        Does: Builds a property that reads and writes a constant on this client's
+            LagPolicy.
+        """
         return property(
             lambda self: getattr(self._lag, name),
             lambda self, value: setattr(self._lag, name, value),
@@ -554,10 +672,16 @@ class Client:
 
     @property
     def _replaying(self) -> bool:
+        """Called by: Tests only (old name).
+        Does: True while the client is in REPLAY.
+        """
         return self._mode is Mode.REPLAY
 
     @property
     def _last_sent_final_sequence(self) -> int:
+        """Called by: Tests only (old name).
+        Does: Reads or sets ReplayCursor.position.
+        """
         return self._cursor.position
 
     @_last_sent_final_sequence.setter
@@ -566,6 +690,9 @@ class Client:
 
     @property
     def _catchup_until(self) -> float:
+        """Called by: Tests only (old name).
+        Does: Reads or sets LagPolicy.catchup_until.
+        """
         return self._lag.catchup_until
 
     @_catchup_until.setter
@@ -574,10 +701,16 @@ class Client:
 
     @property
     def _catchup_lease(self) -> float:
+        """Called by: Tests only (old name).
+        Does: Reads LagPolicy.catchup_lease.
+        """
         return self._lag.catchup_lease
 
     @property
     def _last_lag_delay(self) -> float:
+        """Called by: Tests only (old name).
+        Does: Reads or sets LagPolicy.last_lag_delay.
+        """
         return self._lag.last_lag_delay
 
     @_last_lag_delay.setter
@@ -586,6 +719,9 @@ class Client:
 
     @property
     def _normal_trial_started(self) -> float | None:
+        """Called by: Tests only (old name).
+        Does: Reads or sets LagPolicy.normal_trial_started.
+        """
         return self._lag.normal_trial_started
 
     @_normal_trial_started.setter
@@ -593,6 +729,9 @@ class Client:
         self._lag.normal_trial_started = value
 
     def _start_lag(self, now: float) -> None:
+        """Called by: Tests only (old name).
+        Does: Calls LagPolicy.lag_started.
+        """
         self._lag.lag_started(now)
 
 
@@ -602,7 +741,11 @@ class Client:
 
 
 async def _wait_task(task: asyncio.Task, timeout: float):
-    """Wait for ``task`` up to ``timeout``; raise TimeoutError but leave it running.
+    """Called by: Client._send, Client._close, Client._probe_loop.
+    Does: Waits for a task up to a deadline; raises TimeoutError but leaves the task
+        running.
+
+    Wait for ``task`` up to ``timeout``; raise TimeoutError but leave it running.
 
     asyncio.wait preserves caller cancellation even when the child finishes
     simultaneously (unlike wait_for on supported Python 3.10 versions), and
@@ -615,7 +758,11 @@ async def _wait_task(task: asyncio.Task, timeout: float):
 
 
 async def _stop_task(task: asyncio.Task) -> None:
-    """Cancel ``task`` if still running and wait for it to finish."""
+    """Called by: Client._send, Client._close, Client._probe_loop.
+    Does: Cancels a task if it is still running and waits for it to finish.
+
+    Cancel ``task`` if still running and wait for it to finish.
+    """
     if not task.done():
         task.cancel()
     with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):

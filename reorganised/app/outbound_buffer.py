@@ -40,6 +40,9 @@ class Usage(NamedTuple):
 
     @property
     def finals(self) -> int:
+        """Called by: OutboundBuffer._within_hard_limits.
+        Does: Number of final entries (all entries minus active ones).
+        """
         return self.pending - self.active
 
 
@@ -57,6 +60,9 @@ class OutboundBuffer:
     MAX_BATCH_BYTES = 256 * 1024
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        """Called by: Client.__init__ (one buffer per client), tests.
+        Does: Starts with an empty queue, no pressure, no coalescing and zero counters.
+        """
         self._clock = clock
         # Queue. Monotonic keys preserve arrival order, including several
         # pending revisions of the same segment.
@@ -80,7 +86,12 @@ class OutboundBuffer:
     # ======================================================================
 
     def offer(self, update: CaptionUpdate) -> None:
-        """Queue one update. On the golden path this is just ``_store``."""
+        """Called by: Client.enqueue, Client._escalate_to_replay.
+        Does: Queues one update: append (golden path) or replace (coalescing), after the
+            soft and hard limit checks.
+
+        Queue one update. On the golden path this is just ``_store``.
+        """
         if self._should_close:  # a hard limit was already hit
             self._rejected += 1
             return
@@ -94,24 +105,41 @@ class OutboundBuffer:
         self._store(update, key, usage)
 
     def next_update(self) -> CaptionUpdate | None:
-        """Pop the oldest pending update (strict FIFO)."""
+        """Called by: Client._next_delivery, once per message in normal mode.
+        Does: Removes and returns the oldest pending update (strict FIFO).
+
+        Pop the oldest pending update (strict FIFO).
+        """
         if not self._pending:
             return None
         return self._take(next(iter(self._pending)))
 
     def has_pending(self) -> bool:
+        """Called by: Client._sender_loop, Client._leave_replay_if_caught_up.
+        Does: Says whether anything is queued.
+        """
         return bool(self._pending)
 
     @property
     def pending(self) -> int:
+        """Called by: OutboundBuffer._usage_after, tests.
+        Does: Number of queued entries.
+        """
         return len(self._pending)
 
     @property
     def pending_bytes(self) -> int:
+        """Called by: Tests.
+        Does: Wire bytes of all queued entries.
+        """
         return self._pending_bytes
 
     def _usage_after(self, update: CaptionUpdate, key: int | None) -> Usage:
-        """Usage if ``update`` were stored, replacing ``key``'s entry if given."""
+        """Called by: offer, _apply_soft_limit.
+        Does: Computes the Usage the buffer would have after storing an update.
+
+        Usage if ``update`` were stored, replacing ``key``'s entry if given.
+        """
         existing = self._pending[key] if key is not None else None
         active = self._active_count + int(not update.final)
         pending = self.pending + 1
@@ -124,6 +152,10 @@ class OutboundBuffer:
         return Usage(active, pending, size)
 
     def _store(self, update: CaptionUpdate, key: int | None, usage: Usage) -> None:
+        """Called by: offer, once the limit checks pass.
+        Does: Replaces the segment's entry in place (coalescing) or appends under a new
+            key (golden path).
+        """
         if key is not None:
             self._coalesced += 1  # coalescing: replace the entry in place
         else:
@@ -137,7 +169,13 @@ class OutboundBuffer:
         self._pending_bytes = usage.bytes
 
     def _take(self, key: int) -> CaptionUpdate:
-        """The single removal path; keeps every counter consistent."""
+        """Called by: next_update, drop_finals_keep_latest_active, discard_segment,
+            take_active_update.
+        Does: Removes one entry and keeps every counter correct; clears pressure when
+            the queue empties.
+
+        The single removal path; keeps every counter consistent.
+        """
         update = self._pending.pop(key)
         self._queued_at.pop(key)
         self._by_segment.pop(update.segment, None)
@@ -153,16 +191,25 @@ class OutboundBuffer:
 
     @property
     def pressured(self) -> bool:
-        """True from the soft limit until the backlog fully drains."""
+        """Called by: Client.enqueue, Client._next_delivery.
+        Does: True from the soft limit until the backlog fully drains.
+        """
         return self._pressure_active
 
     @property
     def should_close(self) -> bool:
-        """True once a hard limit refused an update."""
+        """Called by: Client.enqueue, Client._escalate_to_replay, Client._sender_loop.
+        Does: True once a hard limit refused an update.
+        """
         return self._should_close
 
     def _apply_soft_limit(self, update: CaptionUpdate, key: int | None) -> int | None:
-        """Turn on pressure (and coalesce) at the soft limit; return the key to use."""
+        """Called by: offer, while pressure is off.
+        Does: At 256 entries or over 4 MiB, turns pressure on and compacts; returns the
+            key to use.
+
+        Turn on pressure (and coalesce) at the soft limit; return the key to use.
+        """
         if self._pressure_active:
             return key
         usage = self._usage_after(update, key)
@@ -176,6 +223,9 @@ class OutboundBuffer:
         return key
 
     def _within_hard_limits(self, usage: Usage) -> bool:
+        """Called by: offer.
+        Does: Checks 4000 active, 4096 finals and 4 MiB.
+        """
         return (
             usage.active <= self.MAX_PENDING_ACTIVE_SEGMENTS
             and usage.finals <= self.MAX_PENDING_FINALS
@@ -188,10 +238,18 @@ class OutboundBuffer:
 
     @property
     def _coalescing(self) -> bool:
+        """Called by: _store, set_coalescing, _key_to_replace.
+        Does: True under client lag or pressure.
+        """
         return self._lag_coalescing or self._pressure_active
 
     def set_coalescing(self, on: bool) -> None:
-        """Coalesce because the client is lagging (pressure coalesces by itself).
+        """Called by: Client.enqueue (before every normal-mode offer),
+            Client._leave_replay_if_caught_up.
+        Does: Turns lag coalescing on (compacting once) or off (dropping the segment
+            index).
+
+        Coalesce because the client is lagging (pressure coalesces by itself).
 
         Called before every normal-mode offer. On the golden path it is
         ``False`` and changes nothing.
@@ -204,11 +262,18 @@ class OutboundBuffer:
             self._by_segment.clear()
 
     def _key_to_replace(self, update: CaptionUpdate) -> int | None:
-        """This segment's pending entry, if coalescing."""
+        """Called by: offer.
+        Does: Finds this segment's pending entry, if coalescing.
+
+        This segment's pending entry, if coalescing.
+        """
         return self._by_segment.get(update.segment) if self._coalescing else None
 
     def _compact(self) -> None:
-        """Keep each segment's latest state in its original queue position.
+        """Called by: set_coalescing, _apply_soft_limit, drop_finals_keep_latest_active.
+        Does: Keeps each segment's latest entry at its original position and recounts.
+
+        Keep each segment's latest state in its original queue position.
 
         CaptionStore has already rejected stale revisions and changes to a
         final, so each segment's last queued update is its useful state:
@@ -232,7 +297,10 @@ class OutboundBuffer:
     # ======================================================================
 
     def drop_finals_keep_latest_active(self) -> None:
-        """Coalesce, drop every pending final, and clear the limit flags.
+        """Called by: Client._enter_replay (and begin_replay in tests).
+        Does: Compacts, removes every pending final and clears the limit flags.
+
+        Coalesce, drop every pending final, and clear the limit flags.
 
         The sender may still own an in-flight message. It must commit that
         message's delivery cursor before fetching the next shared-log batch.
@@ -246,7 +314,11 @@ class OutboundBuffer:
         self._should_close = False
 
     def discard_segment(self, segment: int) -> None:
-        """Remove a segment's active entry once its final is in the log."""
+        """Called by: Client.enqueue (in REPLAY), Client._escalate_to_replay.
+        Does: Removes a segment's active entry once its final is in the log.
+
+        Remove a segment's active entry once its final is in the log.
+        """
         key = self._by_segment.get(segment)
         if key is not None:
             self._take(key)
@@ -254,7 +326,12 @@ class OutboundBuffer:
     def take_active_update(
         self, provisional_grace: float = 0.0
     ) -> CaptionUpdate | None:
-        """The oldest provisional, unless it is younger than the grace."""
+        """Called by: ReplayCursor.next_replay.
+        Does: Removes and returns the oldest provisional, unless it is younger than the
+            grace.
+
+        The oldest provisional, unless it is younger than the grace.
+        """
         for key, update in self._pending.items():
             if not update.final:
                 if self._clock() - self._queued_at[key] < provisional_grace:
@@ -268,11 +345,18 @@ class OutboundBuffer:
 
     @property
     def coalesced(self) -> int:
+        """Called by: Client.run (printed on disconnect).
+        Does: Number of updates replaced or compacted away.
+        """
         return self._coalesced
 
     @property
     def rejected(self) -> int:
-        """Updates refused after a hard limit."""
+        """Called by: Client.run (printed on disconnect).
+        Does: Number of updates refused after a hard limit.
+
+        Updates refused after a hard limit.
+        """
         return self._rejected
 
     # ======================================================================

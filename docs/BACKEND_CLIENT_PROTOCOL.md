@@ -762,6 +762,145 @@ The return to the blue path is `_leave_replay_if_caught_up` (`client.py:433`). W
 | 537-596 | Test compatibility | Old private names the tests use (`_replaying`, `_last_sent_final_sequence`, `_catchup_until`, `_start_lag`, the lag constants, …), mapped onto `Mode`, `ReplayCursor` and `LagPolicy`. | – |
 | 604-622 | `_wait_task`, `_stop_task` | Module functions: wait with a deadline without cancelling the task, and cancel-and-reap. Used by `_send`, `_close` and `_probe_loop`. | **Support** (2.3.12) |
 
+
+#### 2.4.4 Who calls what, and when
+
+This section lists every component in the two files: who calls it, what it calls, and when it runs. Outside callers are `Server` (`server.py`) and the socket (`ws`); everything else is inside `client.py` and `outbound_buffer.py`.
+
+**Call map.** Thick arrows are the golden path. Thin arrows are the lag and replay features. Calls made by nearly everything (`_wait_task`, `_close`, `_wake.set()`) are left out to keep it readable; the tables below list them.
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 35}}}%%
+flowchart TB
+    subgraph SV["Server (server.py)"]
+        ACC["_accept"]
+        BC["broadcast"]
+        HS["history_snapshot<br/>read_final_batch<br/>final_sequence"]
+    end
+
+    subgraph CL["Client"]
+        RUN["run<br/><i>once per connection</i>"]
+        ENQ["enqueue<br/><i>each caption</i>"]
+        SND["_sender_loop<br/><i>task: wakes on _wake</i>"]
+        NXT["_next_delivery<br/><i>each message</i>"]
+        SEND["_send"]
+        PRB["_probe_loop<br/><i>task: every 0.25 s</i>"]
+        ENT["_enter_replay /<br/>_escalate_to_replay"]
+        LEV["_leave_replay_if_caught_up"]
+    end
+
+    subgraph LP["LagPolicy (pure)"]
+        LAG["thresholds · lag_started ·<br/>still_lagging · probe_finished ·<br/>in_catchup · start_normal_trial"]
+    end
+
+    subgraph RC["ReplayCursor (pure)"]
+        NR["next_replay<br/>position"]
+    end
+
+    subgraph OBF["OutboundBuffer"]
+        OFF["offer"]
+        NU["next_update"]
+        COA["set_coalescing"]
+        DROP["drop_finals_keep_latest_active ·<br/>discard_segment · take_active_update"]
+    end
+
+    ACC ==> RUN
+    BC ==> ENQ
+    RUN -- "HISTORY" --> SEND
+    RUN ==> SND
+    RUN --> PRB
+    RUN -. "snapshot" .-> HS
+    ENQ ==> OFF
+    ENQ --> COA
+    ENQ --> ENT
+    SND ==> NXT
+    SND ==> SEND
+    NXT ==> NU
+    NXT --> ENT
+    NXT --> NR
+    NXT --> LEV
+    NXT -. "final_sequence" .-> HS
+    NR -. "read_final_batch" .-> HS
+    NR --> DROP
+    ENT --> DROP
+    LEV --> COA
+    LEV --> LAG
+    PRB --> LAG
+    PRB --> ENT
+    ENQ -. "_catchup" .-> LAG
+```
+
+**`Client`: entry points and tasks**
+
+| Component | Called by | Calls | When |
+|---|---|---|---|
+| `Client(...)` / `__init__` | `Server._accept` | `OutboundBuffer()`, `LagPolicy()`, `ReplayCursor()` | Once, when a `CLIENT_HELLO` arrives |
+| `run` | `Server._accept` (awaited) | `server.register_client`, `server.history_snapshot`, `History.batches`, `_send` (HISTORY), creates the `_sender_loop` and `_probe_loop` tasks; on exit `server.unregister_client` and the buffer's `coalesced` / `rejected` | Once per connection, for its whole life |
+| `enqueue` | `Server.broadcast` | `REPLAY`: `buffer.discard_segment` or `buffer.offer`. Otherwise: `_catchup`, `buffer.set_coalescing`, `buffer.offer`, `buffer.pressured` / `should_close`, `_escalate_to_replay`. Always `_wake.set()` | Every caption the store accepts, synchronously, for every client |
+| `_sender_loop` | task started by `run` | `buffer.has_pending`, `buffer.should_close`, `_window_full`, `_hold`, `_next_delivery`, `_send`, sets `cursor.position`, `_close` | Runs for the whole connection; drains each time `_wake` is set |
+| `_next_delivery` | `_sender_loop` | `_catchup`, `buffer.pressured`, `_enter_replay`. `REPLAY`: `cursor.next_replay`, `_leave_replay_if_caught_up`. Otherwise: `buffer.next_update`, `server.final_sequence` | Once per message the sender is about to send |
+| `_send` | `run` (HISTORY), `_sender_loop` | `ws.send`, `_wait_task`, `_close` (on timeout), `_stop_task` | Every outgoing frame |
+| `_probe_loop` | task started by `run` | `lag.replay_threshold`, `lag.behind_threshold`, `_round_trip`, `_wait_task`; when late: `lag.lag_started`, `lag.still_lagging`, `_enter_replay`, `_close`; after each probe: `lag.probe_finished`, sets `_probe_tick` and `_wake`; on exit `lag.stop`, `_stop_task` | Every 0.25 s for the whole connection; every 0.25 s more while a pong is late |
+| `_round_trip` | `_probe_loop` | `ws.ping`, then awaits the pong | Once per probe |
+
+**`Client`: mode changes and helpers**
+
+| Component | Called by | Calls | When |
+|---|---|---|---|
+| `_enter_replay` | `_escalate_to_replay`, `_next_delivery`, `_probe_loop` | `buffer.drop_finals_keep_latest_active` (first time only), `_wake.set()` | Buffer pressured or full; sender sees catch-up or pressure; lag outlasts the replay threshold |
+| `_escalate_to_replay` | `enqueue` | `buffer.should_close`, `_enter_replay`, `buffer.discard_segment` or `buffer.offer` | `offer` left the buffer pressured or full |
+| `_leave_replay_if_caught_up` | `_next_delivery` | `_catchup`, `buffer.has_pending`, `buffer.set_coalescing(False)`, `lag.start_normal_trial` | In `REPLAY`, when `next_replay` has nothing to send |
+| `mode` | readers and tests | `_catchup` | On demand (not used by the delivery code itself) |
+| `_catchup` | `enqueue`, `_next_delivery`, `_window_full`, `_leave_replay_if_caught_up`, `mode` | `lag.in_catchup(now)` | Every decision that depends on lag |
+| `_window_full` | `_sender_loop` | `_catchup`, `buffer.MAX_BATCH_ITEMS` / `MAX_BATCH_BYTES` | Before each message |
+| `_hold` | `_sender_loop` | waits on `_probe_tick` (set by `_probe_loop`) | In catch-up, before each window of 64 items / 256 KiB |
+| `_close` | `_sender_loop`, `_send`, `_probe_loop` | `ws.close(1013)`, `_wait_task`, `transport.abort`, `_stop_task` | A hard limit, an expired cursor, or a 75 s stall |
+| `_wait_task`, `_stop_task` (module) | `_send`, `_close`, `_probe_loop` | `asyncio.wait`, `task.cancel` | Every network wait |
+
+**`LagPolicy` (pure, owned by `Client._lag`)**
+
+| Component | Called by | Calls | When |
+|---|---|---|---|
+| `behind_threshold` | `_probe_loop`, `probe_finished` | – | Start of each probe; when learning the RTT |
+| `replay_threshold` | `_probe_loop` | – | Start of each probe |
+| `in_catchup` | `Client._catchup` | – | Every lag-dependent decision |
+| `lag_started` | `_probe_loop` (and `Client._start_lag` in tests) | – | Once, when a pong first becomes late |
+| `still_lagging` | `_probe_loop` | – | Every 0.25 s while the pong stays late |
+| `probe_finished` | `_probe_loop` | `behind_threshold` | After every completed probe |
+| `start_normal_trial` | `_leave_replay_if_caught_up` | – | When the client returns to `NORMAL` |
+| `stop` | `_probe_loop` (`finally`) | – | When the probe task ends |
+
+**`ReplayCursor` (pure, owned by `Client._cursor`)**
+
+| Component | Called by | Calls | When |
+|---|---|---|---|
+| `next_replay` | `_next_delivery` | `buffer.take_active_update`, `server.read_final_batch` (passed in) | Once per message while in `REPLAY` |
+| `position` | set by `run` (snapshot tail) and `_sender_loop` (after each send); read by `next_replay` and `_next_delivery` | – | Moves only after a successful send |
+| `finals_since_active` | changed by `next_replay`; reset by `_next_delivery` (normal provisional) and `_leave_replay_if_caught_up` | – | Counts replayed finals since the last active segment |
+
+**`OutboundBuffer` (owned by `Client._buffer`)**
+
+| Component | Called by | Calls | When |
+|---|---|---|---|
+| `offer` | `enqueue`, `_escalate_to_replay` | `_key_to_replace`, `_apply_soft_limit`, `_usage_after`, `_within_hard_limits`, `_store` | Every caption in normal mode; provisionals only in `REPLAY` |
+| `next_update` | `_next_delivery` | `_take` | Each message in normal mode |
+| `has_pending` | `_sender_loop`, `_leave_replay_if_caught_up` | – | Each sender pass; the caught-up check |
+| `pending`, `pending_bytes` | tests | – | – |
+| `pressured`, `should_close` | `enqueue`, `_escalate_to_replay`, `_next_delivery`, `_sender_loop` | – | After each offer; each message |
+| `set_coalescing` | `enqueue` (lag verdict), `_leave_replay_if_caught_up` (`False`) | `_coalescing`, `_compact` | Before every normal-mode offer; leaving replay |
+| `drop_finals_keep_latest_active` | `_enter_replay` | `_compact`, `_take` | Once, when the client enters `REPLAY` |
+| `discard_segment` | `enqueue` (in `REPLAY`), `_escalate_to_replay` | `_take` | A final arrives that the log now delivers |
+| `take_active_update` | `ReplayCursor.next_replay` | `_take` | Between replayed finals, and when the log is drained |
+| `coalesced`, `rejected` | `run` (`finally`) | – | Printed on disconnect |
+| `MAX_BATCH_ITEMS`, `MAX_BATCH_BYTES` | `_window_full`, `ReplayCursor.next_replay` | – | Sizing catch-up windows and replay reads |
+| `_store` | `offer` | `_coalescing` | Each accepted offer |
+| `_take` | `next_update`, `drop_finals_keep_latest_active`, `discard_segment`, `take_active_update` | – | Every removal |
+| `_usage_after` | `offer`, `_apply_soft_limit` | – | Each offer |
+| `_apply_soft_limit` | `offer` | `_usage_after`, `_compact` | Each offer while pressure is off |
+| `_within_hard_limits` | `offer` | – | Each offer |
+| `_key_to_replace` | `offer` | `_coalescing` | Each offer |
+| `_compact` | `set_coalescing`, `_apply_soft_limit`, `drop_finals_keep_latest_active` | – | Coalescing turns on; pressure starts; entering replay |
+
 ---
 
 ### Appendix: notes found while documenting
