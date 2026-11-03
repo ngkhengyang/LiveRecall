@@ -1,230 +1,291 @@
 # LiveRecall Technical Report
 
-Team: TODO | Members: TODO | Implementation commit: TODO
+Team and members: not supplied. Evaluation: 2 November 2026 (Singapore).
+Server and runner implementation: `6eaced4`; verification began from `0c4532c`
+with the startup/ablation repairs described below. The evidence records source hashes.
 
 ## 1. Architecture and protocol
 
-LiveRecall distributes a revision-based caption stream from the supplied
-`test/caption_source.py` to student browsers over WebSockets. The design separates
-protocol parsing, authoritative caption state, and independent per-client delivery.
+LiveRecall distributes the deterministic caption source to WebSocket clients.
+`solution_server.py` preserves the required `--port` interface and starts an
+asyncio server on `0.0.0.0:8765`. `Server` coordinates one authoritative
+`CaptionStore`, one active source, and independent client connections:
 
 ```text
 caption_source.py -> Source -> Server -> CaptionStore
-                                | accepted updates
-                                v
-                   per-client OutboundBuffer -> sender -> browser
+                                |
+                         per-client OutboundBuffer
+                                |
+                         independent sender -> client
 ```
 
-`submission_root/solution_server.py` calls `Server.main()` and preserves the
-required `python solution_server.py --port <port>` interface. The asyncio server
-defaults to `0.0.0.0:8765`. `app/server.py` owns one `CaptionStore`, the client
-registry, and the one-active-source flag. `app/source.py` handles producer input;
-`app/client.py` manages each student's history response, sender, lag probes, and
-cleanup. `app/outbound_buffer.py` stores pending updates without sending them.
-`client/app.js` manages browser revision state, local recall, and reconnects;
-`client/index.html` provides the caption and recall interface.
+The first JSON object chooses `SOURCE_HELLO` or `CLIENT_HELLO`; malformed JSON,
+unknown roles, and an invalid source hello are closed with code 1008. A missing
+hello times out after five seconds. Client hello fields are lenient: invalid or
+missing values receive defaults, and requested history is capped at 60 seconds.
+Caption validation requires positive integer segment/revision IDs, a finite
+nonnegative timestamp, Boolean final status, string text, and a nonempty session
+matching the producer's session. Unknown source messages and malformed updates
+are ignored; `SOURCE_DONE` is test control and is not broadcast.
 
-The first message selects the connection role: `SOURCE_HELLO` identifies a
-producer and `CLIENT_HELLO` identifies a student. A missing or invalid hello is
-refused after at most five seconds, using close code 1008. The required workload
-uses one session and one active source; a second simultaneous source is refused.
-Caption updates must match the session declared in `SOURCE_HELLO`.
-
-`app/protocol.py` validates caption fields: positive integer segment/revision IDs,
-a finite nonnegative Unix-epoch `source_ts`, a Boolean `final`, string `text`, and
-a nonempty session. It ignores extra fields; the source handler skips malformed
-updates and unknown message types. The server accepts arbitrary increasing
-revision numbers. The supplied producer completes each segment before starting
-the next. `SOURCE_DONE` marks the end of a test stream; the server does not relay
-it to clients.
-
-Accepted updates pass through `CaptionStore` before broadcast. Ingestion and
-per-client enqueueing contain no socket sends or `await`; each client has its own
-sender task, so a blocked send does not directly block other senders. Fan-out
-still costs work proportional to client count. Immutable caption objects cache
-their serialized JSON for reuse. `CLIENT_HELLO` reports a finalized cursor and
-requests up to 60 seconds of context; `HISTORY` precedes live updates. A source
-disconnect retains server state. Starting a new lecture requires a server restart
-and browser reload because segment IDs share one store.
+Ingestion and fan-out contain no socket send or `await`. Each client owns its
+sender, so one stalled socket does not directly block other clients. Fan-out
+still costs work proportional to client count. Immutable update objects cache
+their serialized JSON. The browser replaces one row per segment and applies
+live and history updates through the same revision gate. Starting a different
+lecture requires restarting the server and reloading browsers: the store is
+shared rather than partitioned by session.
 
 ## 2. Revision and recovery semantics
 
-`CaptionStore.validate_and_apply()` keeps one winning update per segment. An
-update must increase the held revision; duplicates and stale revisions are
-rejected before broadcast. Once final, a segment rejects all further updates,
-including higher revisions. Each final therefore enters history once. A retirement
-watermark rejects reclaimed segment IDs, relying on the source's increasing IDs.
+The store accepts strictly increasing revisions and rejects duplicates, stale
+updates, and every revision after a final. Finalization appends the winning
+caption to history once. Final history expires 90 seconds after server acceptance,
+using a monotonic clock; recovery returns only finals within the requested
+0–60 seconds. Expiry also runs on recovery requests after the source stops.
+Unfinished state is capped at 4,000 segments. A retirement watermark rejects
+reclaimed IDs, relying on the supplied producer's increasing segment order.
 
-The server retains finalized captions for 90 seconds after accepting them, using
-a monotonic clock to measure elapsed time. Expired entries are removed when
-processing new updates or recovery requests, including requests made after the
-source stops. Recovery returns only missed finals within the client's requested
-window, up to 60 seconds; the additional retention time does not increase that
-window. The server also limits unfinished segments to 4,000, removing those with
-the smallest IDs if this limit is exceeded. Finalized captions have no count
-limit within the retention window, so memory usage depends on caption rate and
-text size rather than total lecture duration. Missed finals outside the requested
-recovery window cannot be recovered.
+The client sends its latest finalized `(segment, revision)` cursor. History
+contains strictly greater tuples in acceptance order. Registration and the
+history snapshot are synchronous; the initial `HISTORY` is sent before the
+sender starts. Updates arriving during that send enter the live buffer, closing
+the snapshot/subscription gap. Recovery outside the requested window is
+unavailable, and a cursor cannot represent arbitrary holes behind its maximum.
 
-`CLIENT_HELLO` carries the latest finalized `(last_segment, last_revision)`.
-Recovery returns only finals with a greater tuple, oldest first under the supplied
-sequential source. A late join uses `(0, 0)`. Registration and the history snapshot
-execute without an intervening `await`; subsequent arrivals enter the client's
-live buffer while `HISTORY` is sent. The sender starts afterwards, preventing a
-gap between snapshot and subscription or live delivery overtaking history.
-
-The browser applies live and recovered updates through the same revision gate
-and rewrites one row per segment, with distinct live/final badges. It retains
-finals for 150 seconds using `source_ts`, independently of the 80-row display
-limit, and caps unfinished state at 400 segments. Recall filters local finals
-to 15/30/60 seconds, defaulting to 30, without a server request. Automatic
-reconnect retries begin at 500 ms and double to five seconds; the browser sends
-its finalized cursor and requests 60 seconds. State survives disconnection in
-memory; reload becomes a late join. Browser recall assumes sufficiently aligned
-source/client wall clocks.
+The browser retains finals for 150 seconds by source timestamp, independently
+of its 80-row display limit, and caps unfinished state at 400 segments. Recall
+filters local finals into 15/30/60-second windows. Reconnect delay doubles from
+500 ms to five seconds, preserving in-memory revision state and requesting
+60 seconds of history. Reload becomes a late join. Browser recall and measured
+caption age assume aligned source/client wall clocks.
 
 ## 3. Backpressure and overload policy
 
-Each client has an independent sender and an `OutboundBuffer` keyed by segment.
-Replacing a pending entry coalesces superseded provisional revisions without
-changing its FIFO position. When the sender drains between revisions, every
-update is forwarded. A blocked socket stalls its own sender; broadcast only
-enqueues, preserving other clients' independent progress.
+Pending state is keyed by segment, coalescing superseded provisional revisions.
+A soft threshold of 256 pending segments activates catch-up delivery.
+Hard limits are 4,096 pending finals, 4,000 active segments, and 4 MiB of serialized
+pending state per client. Exceeding a limit refuses new work and closes with
+1013; existing pending entries remain intact. The in-flight message, object
+overhead, and WebSocket/TCP buffers lie outside this byte count.
 
-`Client._probe_loop()` keeps one ping outstanding, pausing 250 ms after each
-completed probe. Timely pongs update a smoothed RTT estimate with weight 0.25.
-A pong overdue by `max(0.5 s, 6 * RTT)` activates catch-up for three seconds.
-Pong delay provides an indirect lag signal when socket buffers hide a slow
-reader; network delay can also trigger it. During catch-up, sending waits for
-the next completed probe or at most 0.5 seconds per hold. Finals take priority;
-provisional-only backlog waits until its oldest entry has been queued for one
-second, allowing newer revisions to replace it. After catch-up expires, ordinary
-FIFO delivery resumes without deliberate holds or provisional grace.
+A probe task keeps one ping outstanding, with 250 ms between completed probes.
+Prompt pongs update smoothed RTT with weight 0.25. A pong overdue by
+`max(0.5 s, 6 × RTT)` activates three seconds of catch-up. Sending then waits for
+a completed probe or at most 0.5 seconds. Catch-up or queue pressure batches
+pending finals into `HISTORY` frames, capped at 64 items and 256 KiB. Pending
+finals remain eligible even after the recovery horizon. A provisional-only
+backlog normally waits one second for replacement, with an active-update
+opportunity after four final batches. Ordinary FIFO delivery resumes afterwards.
 
-The pending-segment target is 256. Overflow evicts the oldest pending provisional.
-If all 257 entries are final, the buffer stops accepting updates and requests
-closure with code 1013 instead of evicting a final. One in-flight send and
-WebSocket/TCP buffers lie outside this count; it is not a total byte bound.
-A pong still outstanding at `max(1.5 s, 18 * RTT)` also triggers closure.
+A pong overdue by `max(1.5 s, 18 × RTT)` closes the client for history resync.
+Pong delay is an indirect consumption signal and may also reflect network
+latency. Dequeueing and successful `send()` do not acknowledge application
+receipt. These mechanisms bound application backlog and preserve recent
+recovery state; they do not guarantee complete delivery during sustained overload.
 
-Reconnect requests recent finals through `HISTORY`, avoiding individual replay
-of obsolete revisions. Recovery remains limited to the requested window; closure
-does not guarantee every queued final is recoverable. Extreme overflow can also
-evict an active segment's only pending revision, so latest-active-state delivery
-is not guaranteed in that case. The policy aims for rapid convergence after
-temporary pressure, while sustained overload and lag-detection accuracy require
-the experiments in Section 4; implementation alone does not establish performance.
+## 4. Experiments and results
 
-## 4. Public experiments and results
+### 4.1 Setup and verification
 
-### 4.1 Reproducible setup
+All new measurements used Ubuntu 22.04.5 under WSL2, kernel
+`5.15.167.4-microsoft-standard-WSL2`, an Intel Core i7-1255U, 12 exposed logical
+CPUs, and 7,795 MiB RAM. Python was 3.10.12 and `websockets` 16.1.1. Server,
+source, and simulated clients ran on the same host over loopback. Browser
+rendering was not measured. Freshness threshold was 500 ms; client role seed
+was 3103. The source started after one second and emitted three revisions per
+segment with 0.20-second revision spacing and 0.35-second inter-segment gaps.
 
-TODO: Record Ubuntu version, CPU/RAM, Python and dependency versions, implementation commit, server configuration, caption-source parameters, freshness threshold and exact commands/output paths. Run the server and simulated clients in the same Ubuntu environment for the required networking experiments.
+The initial checkout failed before listening: `server.py` imported missing
+`ABLATIONS` from `client.py`. Restoring that configuration and its probe, grace,
+and resync branches repaired startup and the advertised comparison arms.
+Eight regression tests and all six H10 protocol checks then passed. The H10
+checks cover extra fields, `SOURCE_DONE`, malformed JSON/unknown roles,
+duplicates, stale/post-final updates, and finalized-cursor recovery; they do
+not require strict rejection of malformed client-hello fields.
 
-Use the supplied harness without changing its measurement logic. Run each required test at least three independent times and report the median. Follow [PUBLIC_TESTS.md](PUBLIC_TESTS.md) for commands; record the exact `tc/netem` settings for T5 and reset the impairment afterwards.
+T1–T4 and the unimpaired T5 control each received three independent runs with
+a fresh server. Their durations were 20/40/60/60/40 seconds and client counts
+20/100/100/100/100. T3 used 10% readers sleeping 500 ms per caption frame; T4
+disconnected 20% at 15 seconds for five seconds. Generated finals per run were
+22/49/76/76/49. The supplied analyser's measurement logic was unchanged.
+Values below are medians of the three per-run statistics, not pooled percentiles.
 
-| Test | Required scenario | Configuration / evidence path |
-|---|---|---|
-| T1 | Basic correctness, 20 clients, normal local network | TODO |
-| T2 | Public scale, 100 clients, normal local network | TODO |
-| T3 | 100 clients, 10% slow readers | TODO |
-| T4 | 100 clients, 20% temporarily disconnected | TODO |
-| T5 | Ubuntu `tc/netem` delay, jitter and loss | TODO |
+### 4.2 Public measurements
 
-### 4.2 Measured results
+| Test / group | P50 ms | P95 ms | P99 ms | Complete % | Fresh % | Fresh final % | Coverage % |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| T1 | 1.90 | 3.93 | 4.62 | 100.00 | 100.00 | 100.00 | 100.00 |
+| T2 | 5.33 | 8.97 | 13.17 | 100.00 | 100.00 | 100.00 | 100.00 |
+| T3 | 5.48 | 43.13 | 6950.62 | 99.87 | 95.20 | 90.39 | 94.78 |
+| T3 normal | 5.33 | 11.43 | 20.99 | 100.00 | 100.00 | 100.00 | 100.00 |
+| T3 slow | 4245.58 | 8268.07 | 8592.06 | 98.68 | 4.77 | 3.95 | 47.81 |
+| T4 | 5.27 | 8.14 | 10.58 | 100.00 | 100.00 | 98.42 | 98.33 |
+| T5 control | 5.14 | 7.46 | 11.61 | 100.00 | 100.00 | 100.00 | 100.00 |
 
-Caption Age is client receive time minus `source_ts`, excluding browser rendering;
-report its P50/P95/P99. Final completeness is correctly received unique finals /
-generated unique finals. Fresh Caption Ratio is the fraction of received updates
-within threshold T (public default: 500 ms); Fresh Final Caption Ratio uses generated
-finals as its denominator. Normal Update Coverage measures source revisions
-received during unconstrained operation. Recovery time runs from successful
-reconnect until all required recent recovery state has arrived.
+Caption age is receive time minus the individual revision's `source_ts`.
+Completeness counts unique finals delivered live or through history against
+generated finals for all clients. Fresh update ratio uses accepted live updates;
+fresh final ratio uses all generated finals, including missed finals in its
+denominator. Coverage is unique live revisions/generated revisions; recovered
+history does not restore this metric. T3 role metrics were derived from the same
+CSV rows and denominators, including a separate P99 and completeness per group.
 
-| Test / client group | P50 age (ms) | P95 age (ms) | P99 age (ms) | Final completeness (%) |
-|---|---:|---:|---:|---:|
-| T1 | TODO | TODO | TODO | TODO |
-| T2 | TODO | TODO | TODO | TODO |
-| T3 normal | TODO | TODO | TODO | TODO |
-| T3 slow | TODO | TODO | TODO | TODO |
-| T4 | TODO | TODO | TODO | TODO |
-| T5 | TODO | TODO | TODO | TODO |
+T1 and T2 delivered every generated final and revision with zero connection errors.
+Increasing from 20 to 100 clients raised P95 from 3.93 to 8.97 ms, well below 500 ms on
+this host. T3 normal readers retained 100% coverage and freshness with P95 11.43 ms;
+slow readers had P95 8268.07 ms, 3.95% fresh finals, and 98.68% completeness. The three
+T3 runs missed 10, 0, 10 of 7,600 expected client-finals each by the deadline. Thus
+normal-reader isolation was observed, while slow-reader freshness and complete deadline
+delivery were not achieved. Median T3 connection errors were 30 (normal/slow: 0/30); the
+load client also counts server-triggered resync closures as errors, and quiet public
+logs do not identify each closure's cause. All public runs recorded zero duplicates,
+stale deliveries, and non-final history items.
 
-| Test / client group | Fresh Caption Ratio (%) | Fresh Final Caption Ratio (%) | Normal Update Coverage (%) |
-|---|---:|---:|---:|
-| T1 | TODO | TODO | TODO |
-| T2 | TODO | TODO | TODO |
-| T3 normal | TODO | TODO | TODO |
-| T3 slow | TODO | TODO | TODO |
-| T4 | TODO | TODO | TODO |
-| T5 | TODO | TODO | TODO |
+T4 recovered all finals with first reconnect-HISTORY P95 4.32 ms; all 20 reconnect
+responses per run contained history. Its fresh final ratio was 98.42% because
+outage-delayed finals still count against the 500 ms deadline. Median per-run peak
+server RSS ranged from 24.49 to 32.27 MiB across public scenarios; T3 used 32.27 MiB and
+4.39% of one CPU on average.
 
+**T5 impairment is unverified.** Outside the sandbox, `sudo -n tc qdisc show dev lo`
+failed with “a password is required.” The runner explicitly skipped all five
+impaired public profiles. The required delay/loss profile would apply
+`netem delay 120ms 30ms distribution normal loss 3%` on `lo`, then reset the qdisc.
+The control above is an ordinary local run. No delay/loss tail ratio or empirical
+TCP retransmission conclusion can be drawn from it.
 
-TODO: Interpret the results: correctness under T1, scaling under T2, normal-versus-slow isolation under T3, recovery under T4, and TCP retransmission/head-of-line effects on tail latency under T5. Explain unexpected observations and any failed runs.
+### 4.3 Additional experiment coverage
 
-## 5. Before/after optimization comparison
+The fresh quick run produced 65 scenario/arm medians, including reused final arms, and
+explicitly skipped 22 arms across 14 scenarios requiring tc. Checks recorded 252 PASS,
+10 FAIL, 0 ERROR, and 31 SKIP; counts are individual checks, not scenario pass rates.
+Failed checks affected `H2_s10_m1000`, `H2_s10_m500`, `H2_s30_m1000`, `H2_s30_m250`,
+`H2_s30_m500`, `H2_s50_m1000`, `H2_s50_m500`, `H9`. Failures concerned slow-reader
+delivery, relative isolation, and the short H9 memory slope. Exact checks and values are
+listed in the appendix.
 
-TODO: Select at least one public stress test and compare the final design with an earlier/basic configuration or a major optimization disabled. Identify both configurations and hold workload, environment and measurement settings constant. Use at least three independent runs per configuration and report medians.
+The catalog named `hidden` contains our own engineering stress tests, not the
+evaluator's hidden tests. Quick mode normally uses 20 seconds and at most
+50 clients, with scale cases at 100/200/200 and H9 at 40 seconds; it also shortens
+disconnect, join, and impairment timing. In particular, a quick “70-second”
+disconnect does not test a real 70-second outage. These are workflow checks;
+they do not establish 1,000-client performance, five-minute memory stability,
+or the full recovery-horizon boundary. Missing observations remain unknown.
 
-| Metric (include unit) | Baseline / optimization disabled | Final / optimization enabled | Change |
-|---|---:|---:|---:|
-| TODO: primary performance metric | TODO | TODO | TODO |
-| TODO: final completeness | TODO | TODO | TODO |
-| TODO: coverage or resource metric | TODO | TODO | TODO |
+## 5. Before/after comparison
 
-TODO: Explain the mechanism behind the measured difference and its cost. Quantify the improvement or regression without sacrificing correctness or concealing reduced coverage.
+The full T4 workload compared `experiments/naive_server.py` with the final design,
+using three independent runs each on the same host. Both used 100 clients,
+60 seconds, 20% disconnected at 15 seconds for five seconds, the same source,
+and the supplied analyser. The naive server directly broadcasts updates and
+returns empty history; the final design retains and serves missed finals.
+
+| Metric | Naive baseline | Final design | Final − baseline |
+| --- | --- | --- | --- |
+| Final completeness (%) | 98.17 | 100.00 | +1.83 pp |
+| Fresh finals (%) | 98.17 | 98.42 | +0.25 pp |
+| Live revision coverage (%) | 98.33 | 98.33 | +0.00 pp |
+| Caption age P95 (ms) | 27.87 | 8.14 | -19.73 ms |
+| First reconnect HISTORY P95 (ms) | 11.86 | 4.32 | -7.54 ms |
+| Recovered history items/run | 0.00 | 120.00 | +120.00 items |
+| Peak server RSS (MiB) | 31.05 | 32.10 | +1.04 MiB |
+
+Completeness improved by 1.83 percentage points, with 120 missed finals returned per run
+instead of zero. The naive server's 11.86 ms history response was empty for every
+reconnect; response speed alone therefore does not establish recovery. Fresh finals and
+live coverage cannot count outage-delayed history as fresh/live; their values should be
+read alongside completeness. The final server's median peak RSS changed by +1.04 MiB.
+
+The final design pays for revision state, history, per-client buffers, probes,
+and independent senders. This comparison measures the combined architecture;
+it does not isolate any individual optimization. The quick suite additionally
+executes `no-probe`, `no-grace`, `no-resync`, and `no-all` arms. Those single,
+short runs support exploratory comparisons only. Disabling probes also removes
+the probe-triggered grace and resync path, so these factors are not independent.
+
+For example, quick BA_T3 final completeness was 100.00%, compared with 95.45% without
+probes and 96.36% without resync. The full 60-second T3 nevertheless reached only
+99.87%; the quick run alone would have hidden its deadline-delivery gap.
 
 ## 6. Discussion, limitations and future work
 
-TODO: Discuss failures and engineering trade-offs, including any tuning that did not help. Relate claims to the measurements and distinguish observed behavior from untested expectations.
+The implementation now starts and the local experiment workflows execute, but
+correct protocol handling alone does not establish freshness or completeness
+for slow readers. Reported live latency excludes history items, which can make
+coalescing appear faster while reducing observed live coverage. `HISTORY`
+batching spends one simulated read delay per frame rather than per item; this
+models frame-limited readers and is not a model of per-caption rendering cost.
 
-TODO: State known limits: recovery horizon, sustained overload, tested population/workloads, environment differences, and any incomplete application behavior. Do not claim hidden-workload performance from public tests alone.
+The supplied analyser times every later `HISTORY` as a recovery response, so
+catch-up batches on reconnecting/late clients can contaminate that statistic.
+The full T4 comparison has no slow-reader role and its first reconnect history
+was also checked separately. Process RSS is sampled every 0.5 seconds and
+is neither a total system memory bound nor proof of long-term stability.
+The separate browser demonstration and PDF layout were not exercised by these
+network experiments. T5 and the full stress matrix remain outstanding.
 
-TODO: Give a short, concrete future-work/FYP direction and explain how it builds on the results.
+Future work should add application acknowledgements for finalized state and
+separate initial recovery from later catch-up batches in telemetry, then repeat
+the full slow-reader/soak matrix and same-runner netem control comparisons.
+That would test whether resync closes real delivery gaps and whether the
+RTT-based lag thresholds remain useful under actual network delay.
 
 ## References
 
-- CS3103 Assignment 4 specification, Sections 8-12 (experiments, metrics, environment, report requirements).
-- TODO: Cite external technical sources actually used.
+- Assignment experiment requirements reproduced in [PUBLIC_TESTS.md](PUBLIC_TESTS.md).
+- Experiment definitions and execution details: [experiments/README.md](../experiments/README.md),
+  [scenarios.py](../experiments/scenarios.py), and [run_matrix.py](../experiments/run_matrix.py).
+- Measurement definitions: [analyse_results.py](../test/analyse_results.py)
+  and [load_clients.py](../test/load_clients.py). No external sources were used
+  to substitute for measurements.
 
-## Appendices
+## Appendix: reproduction and evidence
 
-TODO: Put exact commands, per-run outputs, detailed configurations, and any code
-walkthrough here or link to repository evidence. Keep the required design,
-aggregate results, comparison, and analysis in the main 4-5 pages.
+Run from the repository root. Local WebSocket tests need permission to open
+loopback sockets; this execution required leaving the tool's socket-restricted
+sandbox. Each output directory is independent of the older mixed results in
+`output/experiments`.
 
-## Draft completion checklist (remove before export)
+```bash
+./venv/bin/python test/submission_check.py
+./venv/bin/python -m unittest discover -s experiments -p 'test_regressions.py'
+./venv/bin/python experiments/run_matrix.py --suite public --no-tc --runs 3 \
+  --out output/verification-20261102/public
+./venv/bin/python experiments/run_matrix.py --suite before_after --only BA_T4 \
+  --arms naive --no-tc --runs 3 --out output/verification-20261102/comparison
+./venv/bin/python experiments/run_matrix.py --suite all --no-tc --quick --runs 1 \
+  --out output/verification-20261102/smoke
+./venv/bin/python experiments/report.py --out output/verification-20261102/public
+./venv/bin/python experiments/report.py --out output/verification-20261102/comparison
+./venv/bin/python experiments/report.py --out output/verification-20261102/smoke
+```
 
-The assignment specifies **4-5 main pages, excluding references/appendices**;
-it does not prescribe font size or margins. Use a readable export (for example,
-A4, 11 pt text, 20 mm margins) and verify the rendered PDF after completing all
-TODOs. Do not add a separate cover page. The following budgets are drafting
-targets, not assignment rules; they include space for headings and tables.
+Per-run CSV, JSON, logs, and sampled RSS are in
+[`output/verification-20261102`](../output/verification-20261102).
+The checked-in [measurement archive](experiment-results-20261102.json) preserves
+the environment, commands, implementation hashes, full-run summaries, quick
+medians, verdicts, and supplementary role/recovery calculations because raw
+`output/` files are ignored by Git. New runner output records effective settings
+and an implementation digest; reuse requires matching settings and run counts.
+Unlogged counters remain null, and rejected updates and final batches are
+reported using the current implementation's counter names.
 
-| Main section | Page allowance | Prose target |
-|---|---:|---:|
-| 1. Architecture and protocol | 0.90 | 350 words |
-| 2. Revision and recovery | 0.65 | 300 words |
-| 3. Backpressure and overload | 0.65 | 300 words |
-| 4. Experiments and results | 1.50 | 550 words plus the compact results tables |
-| 5. Optimization comparison | 0.55 | 225 words plus one comparison table |
-| 6. Discussion and future work | 0.50 | 175 words |
-| Total | 4.75 | About 1,900 words plus tables |
+### Quick-run checks that failed
 
-Replace TODO instructions with final prose and measurements within these budgets.
-Keep architecture concise; a method-by-method walkthrough belongs in an appendix.
-Leave the remaining 0.25 page for the title, team line, and layout variation.
-An A4/11 pt/20 mm-margin layout projection expanded to these prose targets, with
-the existing tables, rendered to five main pages. This is a planning check;
-verify again after replacing placeholders and adding any figures. Replace a
-table with a figure where useful instead of continually adding material.
+| Scenario | Failed engineering target | Value | Target |
+| --- | --- | --- | --- |
+| H2_s10_m500 | slow_clients.fresh_final_pct >= 50 | 0.00 | 50.00 |
+| H2_s10_m1000 | final_completeness_pct >= 99 | 92.73 | 99.00 |
+| H2_s30_m250 | normal_clients.p95_ms <= ref:H_base.normal_clients.p95_ms*1.5 | 23.27 | 16.82 |
+| H2_s30_m500 | normal_clients.p95_ms <= ref:H_base.normal_clients.p95_ms*1.5 | 18.42 | 16.82 |
+| H2_s30_m500 | slow_clients.fresh_final_pct >= 50 | 0.00 | 50.00 |
+| H2_s30_m1000 | final_completeness_pct >= 99 | 78.18 | 99.00 |
+| H2_s50_m500 | slow_clients.fresh_final_pct >= 50 | 0.00 | 50.00 |
+| H2_s50_m1000 | normal_clients.p95_ms <= ref:H_base.normal_clients.p95_ms*1.5 | 27.58 | 16.82 |
+| H2_s50_m1000 | final_completeness_pct >= 99 | 63.64 | 99.00 |
+| H9 | rss_slope_mb_per_min <= 1 | 2.77 | 1.00 |
 
-- [ ] All required sections are supported by the submitted implementation and evidence; no TODOs remain.
-- [ ] Sections 2-3 explain actual rules, numeric bounds, and failure/recovery limits.
-- [ ] Results cover all required metrics, recovery time, isolation, and bounded resource usage.
-- [ ] The separate deterministic browser demo covers revision replacement, local recall, reconnect, and late join.
-- [ ] T1–T5 each have at least three independent runs; medians and units are clear.
-- [ ] At least one stress-test before/after comparison is quantified and reproducible.
-- [ ] The main report is 4–5 pages after PDF export, excluding references/appendices.
-- [ ] The reviewed PDF is saved as `submission_root/report.pdf`.
-- [ ] README, AI usage, contributions and the separate 5–7-minute demo video are completed.
+The team/member identity has not been supplied. Final submission still needs
+the impaired-network evidence, review of the rendered 4–5-page main report,
+`submission_root/report.pdf`, submission documents, and the separate demo video.

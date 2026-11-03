@@ -35,13 +35,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import os
 from typing import TYPE_CHECKING
 
 from websockets.exceptions import ConnectionClosed
 
 from .outbound_buffer import OutboundBuffer
-from .protocol import CaptionUpdate, ClientHello, History
+from .protocol import CaptionUpdate, ClientHello, History, Pad
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
     from .server import Server
@@ -61,7 +62,7 @@ class Client:
     # behind to stay inside its buffer bound.
     TOO_FAR_BEHIND = 1013
 
-    # Gap between consumption probes.
+    # Gap between ordinary backlog pings.
     PROBE_INTERVAL_SECONDS = 0.25
     # Floors for the two verdicts below. Both are also scaled against this
     # connection's own measured round trip, so a link with real delay and
@@ -70,32 +71,44 @@ class Client:
     # 120 ms +/- 30 ms with 3% loss, which a fixed threshold would read as a
     # stalled reader.
     BEHIND_AFTER_SECONDS = 0.5
-    # Upper bound on one hold. A client that never recovers still makes
-    # forward progress on finals instead of stalling outright.
-    MAX_HOLD_SECONDS = 0.5
     # How long one overdue pong keeps this client in catch-up mode. A reader
     # that is behind drains just enough to answer a ping and then falls back,
     # so without a sticky window the sender resumes flooding the moment a
     # single pong lands and the client spends its read budget on revisions
     # that are obsolete by the time it reaches them.
     CATCHUP_STICKY_SECONDS = 3.0
-    # A pong still outstanding this long means the reader has stopped draining
-    # altogether and is sitting on a queue of revisions that are already
-    # obsolete. Closing is faster than feeding it: every final it missed is in
-    # the server's bounded history, so its own reconnect returns the whole set
-    # in a single HISTORY message instead of one message per final -- which,
-    # for a reader consuming two messages a second, is the difference between
-    # converging now and never catching up at all.
-    RESYNC_AFTER_SECONDS = 1.5
+    # Lack of any acknowledged progress, rather than ordinary slowness, is
+    # grounds for resync. Leave time for a full receive queue to drain first.
+    RESYNC_AFTER_SECONDS = 30.0
     BEHIND_RTT_MULTIPLIER = 6.0
     RESYNC_RTT_MULTIPLIER = 18.0
     RTT_SMOOTHING = 0.25
+    RATE_SMOOTHING = 0.25
+    PACING_MARGIN = 1.1
+    PACING_BACKOFF = 1.25
+    # A pong acknowledges the library's read, not application consumption.
+    # Reserve half the observed stall again for the unknown queue tail; this
+    # estimate uses no assumed peer queue size or source revision frequency.
+    DRAIN_MARGIN = 0.5
+    # Prompt pongs alone cannot prove consumption. Ignored pads after a real
+    # paced frame expose its processing delay without adding caption work.
+    CONSUMPTION_PROBE_INTERVAL = 2.0
+    CONSUMPTION_PROBE_MAX_INTERVAL = 4.0
+    # Exceed the typical receive-queue high watermark (websockets default 16).
+    # Without such a queue, prompt pongs fall back to overdue-pong re-detection.
+    PROBE_PAD_FRAMES = 24
+    # The padprobe experiment saw 2 ms false pongs at zero gap, but 506 ms
+    # at 20 ms: let pads pause the peer's reads before the ping arrives.
+    PROBE_PING_GAP_SECONDS = 0.02
+    PROBE_PING_GAP_RTT_MULTIPLIER = 4.0
+    OFFERED_RATE_WINDOW_SECONDS = 2.0
+    RECOVERY_UTILISATION = 0.5
+    RECOVERY_CONFIRMATIONS = 3
     # While behind, hold a lone provisional revision this long before sending
     # it. The deterministic source finalizes a segment in about 0.4 s, so the
     # revision is normally replaced in place by its own final and one message
     # carries what three would have.
     PROVISIONAL_GRACE_SECONDS = 1.0
-    MAX_FINAL_BATCHES_BEFORE_ACTIVE = 4
 
     def __init__(self, ws, hello: ClientHello, server: "Server") -> None:
         self.ws = ws
@@ -106,10 +119,26 @@ class Client:
         self._probe_tick = asyncio.Event()
         self._catchup_until = 0.0
         self._rtt = 0.0
+        self._sent_frames = 0
+        self._pong_overdue = False
+        self._rate = 0.0
+        self._pace_interval = 0.0
+        self._next_send_at = 0.0
+        self._unread_frames = 0.0
+        self._unread_at = 0.0
+        self._offered_rate = 0.0
+        self._offered_at = 0.0
+        self._consumption_probe_at = 0.0
+        self._consumption_probe_interval = self.CONSUMPTION_PROBE_INTERVAL
+        self._consumption_probe_done = asyncio.Event()
+        self._consumption_probe_done.set()
+        self._backlog_probe_done = asyncio.Event()
+        self._backlog_probe_done.set()
+        self._consumption_probe_task: asyncio.Task | None = None
+        self._recovery_confirmations = 0
         self._held = 0
         self._batches_sent = 0
         self._batched_finals = 0
-        self._final_batches_since_active = 0
         self._in_flight: CaptionUpdate | History | None = None
         self._tasks: list[asyncio.Task] = []
 
@@ -117,12 +146,20 @@ class Client:
         return max(self.BEHIND_AFTER_SECONDS, self.BEHIND_RTT_MULTIPLIER * self._rtt)
 
     def _resync_threshold(self) -> float:
-        return max(self.RESYNC_AFTER_SECONDS, self.RESYNC_RTT_MULTIPLIER * self._rtt)
+        return max(
+            self.RESYNC_AFTER_SECONDS,
+            self.RESYNC_RTT_MULTIPLIER * self._rtt,
+            self.RESYNC_RTT_MULTIPLIER * self._pace_interval,
+        )
 
     @property
     def _catchup(self) -> bool:
         """True while a recently overdue pong still governs this client."""
-        return asyncio.get_running_loop().time() < self._catchup_until
+        return (
+            self._pong_overdue
+            or self._pace_interval > 0.0
+            or asyncio.get_running_loop().time() < self._catchup_until
+        )
 
     async def run(self) -> None:
         # Step order here is load-bearing; see the note at the end of this
@@ -146,6 +183,7 @@ class Client:
             # task that could emit live updates does not exist until after it
             # has been sent.
             await self.ws.send(History(items).to_json())
+            self._sent_frames += 1
             self._tasks = [asyncio.create_task(self._sender_loop())]
             if "probe" not in ABLATIONS:
                 self._tasks.append(asyncio.create_task(self._probe_loop()))
@@ -156,9 +194,10 @@ class Client:
         except ConnectionClosed:
             pass
         finally:
-            for task in self._tasks:
+            tasks = tuple(self._tasks)
+            for task in tasks:
                 task.cancel()
-            for task in self._tasks:
+            for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
                     await task
             self.server.unregister_client(self)
@@ -194,8 +233,16 @@ class Client:
         Called from ``Server.broadcast``. It only mutates in-memory buffer
         state, so a stalled reader here cannot delay any other client.
         """
+        now = asyncio.get_running_loop().time()
+        self._offered_rate *= math.exp(
+            -(now - self._offered_at) / self.OFFERED_RATE_WINDOW_SECONDS
+        )
+        self._offered_rate += 1.0 / self.OFFERED_RATE_WINDOW_SECONDS
+        self._offered_at = now
         self._buffer.offer(update)
         self._wake.set()
+        if self._buffer.should_close:
+            self._probe_tick.set()
 
     # -- tasks ----------------------------------------------------------
 
@@ -212,11 +259,8 @@ class Client:
                     if self._buffer.should_close:
                         break
                     if self._catchup:
-                        # Pace to this client's measured round trip: one
-                        # message per completed probe. While the hold runs,
-                        # newer revisions overwrite superseded ones in place,
-                        # so what goes out next is the freshest state rather
-                        # than the head of a stale queue.
+                        # Keep ownership in the buffer until a consumption
+                        # slot opens, so finals can join the same batch.
                         await self._hold()
                         if self._buffer.should_close or not self._buffer.has_pending():
                             break
@@ -229,7 +273,15 @@ class Client:
                     # Dequeue transfers ownership to this in-flight message;
                     # completing send is not an application-level client ACK.
                     self._in_flight = delivery
+                    sent_at = asyncio.get_running_loop().time()
                     await self.ws.send(delivery.to_json())
+                    self._sent_frames += 1
+                    if self._pace_interval:
+                        now = asyncio.get_running_loop().time()
+                        self._drain_estimate(now)
+                        self._unread_frames += 1.0
+                        self._next_send_at = now + self._pace_interval
+                        await self._consumption_probe(sent_at)
                     self._in_flight = None
                     if isinstance(delivery, History):
                         self._batches_sent += 1
@@ -248,44 +300,169 @@ class Client:
         catching_up = self._catchup or self._buffer.pressured
         grace = 0.0 if "grace" in ABLATIONS else self.PROVISIONAL_GRACE_SECONDS
         if catching_up:
-            # Continuing final batches must not starve active segments.
-            if self._final_batches_since_active >= self.MAX_FINAL_BATCHES_BEFORE_ACTIVE:
-                active = self._buffer.take_active_update(grace)
-                if active is not None:
-                    self._final_batches_since_active = 0
-                    return active
+            # Spend each slow-reader slot on all available finals before a
+            # provisional; the newest active revision remains in the buffer.
             items = self._buffer.take_final_batch()
             if items:
-                self._final_batches_since_active += 1
                 return History(items)
         delivery = self._buffer.next_update(
             prefer_final=catching_up,
             provisional_grace=grace,
         )
-        if delivery is not None and not delivery.final:
-            self._final_batches_since_active = 0
         return delivery
 
+    def _drain_estimate(self, now: float) -> None:
+        self._unread_frames = max(
+            0.0, self._unread_frames - self._rate * (now - self._unread_at)
+        )
+        self._unread_at = now
+
     async def _hold(self) -> None:
-        """Wait for the next completed probe, or ``MAX_HOLD_SECONDS``."""
+        """Wait for a usable slot; an overdue pong never permits a send."""
         self._held += 1
-        self._probe_tick.clear()
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(
-                self._probe_tick.wait(), timeout=self.MAX_HOLD_SECONDS
+        loop = asyncio.get_running_loop()
+        while not self._buffer.should_close:
+            self._probe_tick.clear()
+            now = loop.time()
+            self._drain_estimate(now)
+            delay = max(
+                self._next_send_at - now,
+                self._unread_frames / self._rate if self._rate else 0.0,
             )
+            if not self._pong_overdue and delay <= 0.0:
+                return
+            if self._pong_overdue:
+                await self._probe_tick.wait()
+            else:
+                # A timer opens a slot, never overrides an overdue pong. A
+                # probe waking us early simply rechecks the current estimate.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._probe_tick.wait(), timeout=delay)
+
+    async def _consumption_probe(self, sent_at: float) -> None:
+        """Measure consumption after a real paced frame, with bounded padding."""
+        if (
+            "probe" in ABLATIONS
+            or not self._pace_interval
+            or self._pong_overdue
+            or not self._backlog_probe_done.is_set()
+            or (
+                self._consumption_probe_task is not None
+                and not self._consumption_probe_task.done()
+            )
+            or sent_at - self._consumption_probe_at < self._consumption_probe_interval
+        ):
+            return
+        self._consumption_probe_at = sent_at
+        # Start only between backlog pings, and fence them until the probe finishes.
+        self._consumption_probe_done.clear()
+        task = None
+        try:
+            pad = Pad().to_json()
+            for _ in range(self.PROBE_PAD_FRAMES):
+                await self.ws.send(pad)
+            # Only padding stays inline, so a probe's gap and pong never hold finals.
+            task = asyncio.create_task(
+                self._finish_consumption_probe(sent_at, self._sent_frames)
+            )
+            self._consumption_probe_task = task
+            self._tasks.append(task)
+            task.add_done_callback(self._tasks.remove)
+            task.add_done_callback(lambda _: self._consumption_probe_done.set())
+        finally:
+            if task is None:
+                self._consumption_probe_done.set()
+
+    async def _finish_consumption_probe(self, sent_at: float, sent_frames: int) -> None:
+        """Include the separation gap in the real frame's consumption delay."""
+        try:
+            await asyncio.sleep(
+                max(
+                    self.PROBE_PING_GAP_SECONDS,
+                    self.PROBE_PING_GAP_RTT_MULTIPLIER * self._rtt,
+                )
+            )
+            # A later real frame changes the queue under measurement. Require
+            # a fresh run of confirmations rather than trusting this sample.
+            if self._sent_frames != sent_frames or self._pong_overdue:
+                self._recovery_confirmations = 0
+                return
+            pong = await self.ws.ping()
+            await asyncio.wait_for(
+                asyncio.shield(pong), timeout=self._behind_threshold()
+            )
+        except asyncio.TimeoutError:
+            self._consumption_probe_interval = min(
+                self.CONSUMPTION_PROBE_MAX_INTERVAL,
+                2.0 * self._consumption_probe_interval,
+            )
+            self._recovery_confirmations = 0
+            return
+        except ConnectionClosed:
+            self._recovery_confirmations = 0
+            return
+        now = asyncio.get_running_loop().time()
+        offered_rate = self._offered_rate * math.exp(
+            -(now - self._offered_at) / self.OFFERED_RATE_WINDOW_SECONDS
+        )
+        if (
+            not self._pong_overdue
+            and offered_rate > 0.0
+            and (now - sent_at) * offered_rate < self.RECOVERY_UTILISATION
+        ):
+            self._consumption_probe_interval = self.CONSUMPTION_PROBE_INTERVAL
+            self._recovery_confirmations += 1
+        else:
+            self._consumption_probe_interval = min(
+                self.CONSUMPTION_PROBE_MAX_INTERVAL,
+                2.0 * self._consumption_probe_interval,
+            )
+            self._recovery_confirmations = 0
+            # One real frame's delay measures consumption; pads carry no work.
+            self._drain_estimate(now)
+            sample = 1.0 / (now - sent_at)
+            if self._rate:
+                self._rate += self.RATE_SMOOTHING * (sample - self._rate)
+            else:
+                self._rate = sample
+            self._pace_interval = self.PACING_MARGIN / self._rate
+            self._probe_tick.set()
+        if self._recovery_confirmations >= self.RECOVERY_CONFIRMATIONS:
+            self._pace_interval = 0.0
+            self._rate = 0.0
+            self._next_send_at = 0.0
+            self._unread_frames = 0.0
+            self._unread_at = now
+            self._catchup_until = 0.0
+            self._recovery_confirmations = 0
+            self._probe_tick.set()
+            self._wake.set()
 
     async def _probe_loop(self) -> None:
-        """Keep exactly one ping in flight and publish the verdict.
+        """Keep one ordinary backlog ping in flight and publish the verdict.
 
-        One overdue pong puts this client in catch-up mode for the next few
-        seconds; the window simply expires if the client keeps answering
-        promptly. Only this task sends pings, so there is never more than one
-        outstanding no matter how far behind the client gets.
+        Delayed acknowledgements measure throughput while backlogged. Prompt
+        acknowledgements during pacing are demand-limited, so treating their
+        frame deltas as consumption would mistake an idle source for a slow
+        reader. Keep only one measurement anchor, never a lecture-long log.
         """
+        loop = asyncio.get_running_loop()
+        measured_at = loop.time()
+        acknowledged_frames = self._sent_frames
+        consumption_probe_at = self._consumption_probe_at
         try:
             while True:
+                await self._consumption_probe_done.wait()
+                if consumption_probe_at != self._consumption_probe_at:
+                    # Padding time must not enter an ordinary throughput sample.
+                    consumption_probe_at = self._consumption_probe_at
+                    measured_at = loop.time()
+                    acknowledged_frames = self._sent_frames
+                self._backlog_probe_done.clear()
+                sent_frames = self._sent_frames
+                ping_at = loop.time()
                 pong = await self.ws.ping()
+                overdue = False
                 try:
                     latency = await asyncio.wait_for(
                         asyncio.shield(pong), timeout=self._behind_threshold()
@@ -296,9 +473,13 @@ class Client:
                 except asyncio.TimeoutError:
                     # Overdue: stop pushing, then keep waiting on this pong
                     # rather than issuing another ping behind it.
-                    loop = asyncio.get_running_loop()
+                    overdue = True
+                    self._pong_overdue = True
+                    self._recovery_confirmations = 0
                     self._catchup_until = loop.time() + self.CATCHUP_STICKY_SECONDS
+                    self._pace_interval *= self.PACING_BACKOFF
                     self._wake.set()
+                    self._probe_tick.set()
                     try:
                         if "resync" in ABLATIONS:
                             await asyncio.shield(pong)
@@ -307,7 +488,7 @@ class Client:
                                 asyncio.shield(pong),
                                 timeout=max(
                                     0.0,
-                                    self._resync_threshold() - self._behind_threshold(),
+                                    self._resync_threshold() - (loop.time() - ping_at),
                                 ),
                             )
                     except asyncio.TimeoutError:
@@ -320,8 +501,44 @@ class Client:
                             self.TOO_FAR_BEHIND, "resynchronize via history"
                         )
                         return
+                now = loop.time()
+                self._drain_estimate(now)
+                if overdue:
+                    stall = max(0.0, now - ping_at - self._rtt)
+                    frames = sent_frames - acknowledged_frames
+                    if frames > 0:
+                        # Include a tail reserve in the first sample because
+                        # even the previous prompt pong may have left frames
+                        # unread. Later samples span consecutive delayed ACKs.
+                        elapsed = now - measured_at
+                        if not self._rate:
+                            elapsed += stall * self.DRAIN_MARGIN
+                        sample = frames / elapsed
+                        if self._rate:
+                            self._rate += self.RATE_SMOOTHING * (sample - self._rate)
+                        else:
+                            self._rate = sample
+                    if self._rate:
+                        self._pace_interval = max(
+                            self._pace_interval, self.PACING_MARGIN / self._rate
+                        )
+                        self._unread_frames = max(
+                            self._unread_frames,
+                            self._rate * stall * self.DRAIN_MARGIN
+                            + self._sent_frames
+                            - sent_frames,
+                        )
+                    else:
+                        # No data crossed the probe: this was link delay, not
+                        # evidence from which to invent a consumption rate.
+                        self._next_send_at = now + stall * self.DRAIN_MARGIN
+                    measured_at = now
+                    acknowledged_frames = sent_frames
+                    self._catchup_until = now + self.CATCHUP_STICKY_SECONDS
+                self._pong_overdue = False
                 self._probe_tick.set()
                 self._wake.set()
+                self._backlog_probe_done.set()
                 await asyncio.sleep(self.PROBE_INTERVAL_SECONDS)
         except ConnectionClosed:
             return
@@ -329,5 +546,8 @@ class Client:
             raise
         finally:
             # Never leave the sender blocked on a connection that is going away.
+            self._backlog_probe_done.set()
             self._catchup_until = 0.0
+            self._pong_overdue = False
+            self._pace_interval = 0.0
             self._probe_tick.set()

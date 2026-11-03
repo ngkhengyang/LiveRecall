@@ -190,6 +190,19 @@ class CaptionUpdate:
             object.__setattr__(self, "_json_cache", cached)
         return cached
 
+    @property
+    def wire_size(self) -> int:
+        """Share byte accounting across client buffers along with the JSON.
+
+        JSON uses ensure_ascii=True, so character count is the UTF-8 length.
+        Caching on the update keeps this bounded by the update's own lifetime.
+        """
+        cached = self.__dict__.get("_wire_size_cache")
+        if cached is None:
+            cached = len(self.to_json())
+            object.__setattr__(self, "_wire_size_cache", cached)
+        return cached
+
 
 @dataclass(frozen=True)
 class History:
@@ -206,6 +219,14 @@ class History:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
+
+
+@dataclass(frozen=True)
+class Pad:
+    """Tiny consumption-probe extension frame; clients ignore this type."""
+
+    def to_json(self) -> str:
+        return '{"type":"PAD"}'
 
 
 @dataclass(frozen=True)

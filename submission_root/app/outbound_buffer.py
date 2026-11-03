@@ -79,10 +79,9 @@ class OutboundBuffer:
         )
         active_count += int(not update.final)
         pending_count = self.pending + int(existing is None)
-        # to_json uses ensure_ascii=True, so string length equals UTF-8 size.
-        pending_bytes = self._pending_bytes + len(update.to_json())
+        pending_bytes = self._pending_bytes + update.wire_size
         if existing is not None:
-            pending_bytes -= len(existing.to_json())
+            pending_bytes -= existing.wire_size
         if (
             active_count > self.MAX_PENDING_ACTIVE_SEGMENTS
             or pending_count - active_count > self.MAX_PENDING_FINALS
@@ -113,7 +112,7 @@ class OutboundBuffer:
             update = self._pending[segment]
             if not update.final:
                 continue
-            item_size = len(update.to_json()) + (2 if items else 0)
+            item_size = update.wire_size + (2 if items else 0)
             if size + item_size > self.MAX_BATCH_BYTES:
                 break
             items.append(update)
@@ -153,5 +152,5 @@ class OutboundBuffer:
         update = self._pending.pop(segment)
         self._queued_at.pop(segment)
         self._active_count -= int(not update.final)
-        self._pending_bytes -= len(update.to_json())
+        self._pending_bytes -= update.wire_size
         return update
