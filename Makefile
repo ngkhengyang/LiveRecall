@@ -17,6 +17,19 @@ install:
 	./venv/bin/pre-commit install --config config/.pre-commit-config.yaml
 	./venv/bin/python test/submission_check.py
 
+
+install-VM:
+	pip install -r submission_root/requirements.txt
+	pip install -r config/requirements-dev.txt
+	sudo apt install -y iproute2
+	sudo apt install -y linux-modules-extra-$(uname -r)   # Ubuntu ships netem here; skip if modprobe already works
+	sudo modprobe sch_netem
+	sudo tc qdisc add dev lo root netem delay 1ms && sudo tc qdisc del dev lo root && echo "netem OK"
+	echo "$USER ALL=(root) NOPASSWD: $(command -v tc)" | sudo tee /etc/sudoers.d/liverecall-tc
+	sudo chmod 440 /etc/sudoers.d/liverecall-tc
+	sudo -n tc qdisc show dev lo && echo "passwordless tc OK"
+
+
 # Basic public experiment (20 clients, 20 seconds, one run).
 demo-basic:
 	./venv/bin/python test/run_demo.py --clients 20 --duration 20 --runs 1
@@ -85,10 +98,16 @@ demo-caption:
 
 .PHONY: exp-probe exp-probe-quick
 
+# Full path of the virtual environment used by the probe experiment.
+# Pass any venv on the command line, e.g.
+#   make exp-probe VENV=/mnt/c/Users/games/Desktop/LiveRecall/venvVM
+#   make exp-probe-quick VENV=/home/me/envs/liverecall
+VENV ?= $(CURDIR)/venv
+
 # Full probe comparison, with progressive and final terminal summaries (~25 min).
 exp-probe:
-	./venv/bin/python -u experiments/probe_ab.py
+	$(VENV)/bin/python -u experiments/probe_ab.py --venv $(VENV)
 
 # One T1 run per arm for a quick harness check.
 exp-probe-quick:
-	./venv/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick
+	$(VENV)/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick --venv $(VENV)

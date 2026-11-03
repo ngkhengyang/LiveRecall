@@ -29,14 +29,21 @@ remaining arms and tests continue, and the harness ultimately exits nonzero.
 Progress lines and each completed test's median table appear live. At completion,
 the command prints all median tables, a ready-to-paste T3 Section 5 table, verdicts,
 and saved paths. `SUMMARY.md` and `summary.csv` include per-run values;
-`configuration.json` records the git commit, client hashes, Python and websockets
-versions, test arguments, timestamp, run count, port, and exit statuses.
+`configuration.json` records the test arguments, run count, port, and exit statuses.
 
 Custom runs and summary reprinting:
 
 ```sh
 ./venv/bin/python -u experiments/probe_ab.py --tests t1,t3 --runs 3 --port 8811 --out output/probe_ab_custom
 ./venv/bin/python -u experiments/probe_ab.py --out output/probe_ab_custom --summary-only
+```
+
+The tests run with the repository's `venv` by default. Pass `--venv` with the
+full path of any virtual environment to use that one instead:
+
+```sh
+./venv/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --venv /home/me/envs/liverecall
+make exp-probe-quick VENV=/mnt/c/Users/games/Desktop/LiveRecall/venvVM
 ```
 
 Summary-only uses the recorded test selection and run count by default. An explicit
