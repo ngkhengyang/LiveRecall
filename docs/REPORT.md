@@ -9,18 +9,19 @@ LiveRecall distributes a revision-based caption stream from the supplied
 protocol parsing, authoritative caption state, and independent per-client delivery.
 
 ```text
-caption_source.py -> Source -> Server -> CaptionStore
-                                | accepted updates
-                                v
-                   per-client OutboundBuffer -> sender -> browser
+caption_source.py -> Source -> Server -> CaptionStore / shared final log
+                                | enqueue             | replay finals
+                                v                     v
+                     per-client FIFO / active state -> sender -> browser
 ```
 
 `submission_root/solution_server.py` calls `Server.main()` and preserves the
 required `python solution_server.py --port <port>` interface. The asyncio server
 defaults to `0.0.0.0:8765`. `app/server.py` owns one `CaptionStore`, the client
 registry, and the one-active-source flag. `app/source.py` handles producer input;
-`app/client.py` manages each student's history response, sender, lag probes, and
-cleanup. `app/outbound_buffer.py` stores pending updates without sending them.
+`app/client.py` manages each student's history response, sender, lag probes,
+shared-log delivery cursor, and cleanup. `app/outbound_buffer.py` stores normal
+pending updates or latest active state during replay without sending them.
 `client/app.js` manages browser revision state, local recall, and reconnects;
 `client/index.html` provides the caption and recall interface.
 
@@ -55,23 +56,29 @@ rejected before broadcast. Once final, a segment rejects all further updates,
 including higher revisions. Each final therefore enters history once. A retirement
 watermark rejects reclaimed segment IDs, relying on the source's increasing IDs.
 
-The server retains finalized captions for 90 seconds after accepting them, using
-a monotonic clock to measure elapsed time. Expired entries are removed when
-processing new updates or recovery requests, including requests made after the
-source stops. Recovery returns only missed finals within the client's requested
-window, up to 60 seconds; the additional retention time does not increase that
-window. The server also limits unfinished segments to 4,000, removing those with
-the smallest IDs if this limit is exceeded. Finalized captions have no count
-limit within the retention window, so memory usage depends on caption rate and
-text size rather than total lecture duration. Missed finals outside the requested
-recovery window cannot be recovered.
+Each accepted final receives a contiguous internal sequence number and enters
+an insertion-ordered shared log, retained for 90 seconds using a monotonic clock.
+The final-tail and evicted-final watermarks remain meaningful when the log is
+empty. Expiry removes the corresponding segment state; a separate retirement
+watermark rejects obsolete source IDs. The server caps unfinished segments at
+4,000. Final-state memory depends on caption rate and size within retention,
+not total lecture duration. Reconnect context remains limited to the requested
+0--60 seconds; connected replay can deliver older outstanding finals while
+they remain in the shared log. It raises `ReplayExpired` rather than silently
+skipping a prefix that has expired.
 
 `CLIENT_HELLO` carries the latest finalized `(last_segment, last_revision)`.
 Recovery returns only finals with a greater tuple, oldest first under the supplied
-sequential source. A late join uses `(0, 0)`. Registration and the history snapshot
-execute without an intervening `await`; subsequent arrivals enter the client's
-live buffer while `HISTORY` is sent. The sender starts afterwards, preventing a
-gap between snapshot and subscription or live delivery overtaking history.
+sequential source. A late join uses `(0, 0)`. Registration and
+`history_snapshot()` execute without an intervening `await`, capturing requested
+items and the final-log tail together. Only after `HISTORY` is sent successfully
+does the connection initialize its delivery cursor to that captured tail and
+start its sender. Finals arriving during the send lie after the boundary;
+empty or zero-second context does not replay older unrequested finals. The
+cursor advances only after successful sends and is not an application ACK.
+Persistent reconnect delivery sessions and application acknowledgements are
+not implemented; a genuine reconnect still uses the client's recent-context
+request.
 
 The browser applies live and recovered updates through the same revision gate
 and rewrites one row per segment, with distinct live/final badges. It retains
@@ -85,46 +92,49 @@ source/client wall clocks.
 
 ## 3. Backpressure and overload policy
 
-Each client has an independent sender and an `OutboundBuffer` that preserves
-every revision in FIFO arrival order during normal operation, including bursts
-received before the sender runs. Detected client lag or queue pressure enables
-semantic compaction: superseded provisional revisions are removed while each
-segment's final or latest active revision keeps its original queue position and
-enqueue age. A blocked socket stalls its own sender; broadcast only enqueues,
-preserving other clients' independent progress.
+Normal delivery preserves every revision in a per-client FIFO. Lag or queue
+pressure switches the existing connection to shared-log replay: pending finals
+leave the local buffer, and the sender reads finals after its committed cursor.
+Subsequent finals only wake the sender and remove any corresponding active
+entry. Locally retained active state is coalesced without resetting its original
+enqueue age. The soft threshold is 256 updates; final/byte admission overflow
+also attempts replay instead of routinely disconnecting. Latest active state
+must still fit within 4,000 entries and 4 MiB of pending JSON. One in-flight
+message and transport buffers lie outside these limits.
 
-`Client._probe_loop()` keeps one ping outstanding, pausing 250 ms after each
-completed probe. Timely pongs update a smoothed RTT estimate with weight 0.25.
-A pong overdue by `max(0.5 s, 6 * RTT)` activates catch-up, refreshed while the
-pong remains outstanding. After a late pong, coalescing continues for at least
-three seconds or its measured delay, whichever is longer, allowing downstream
-backlog to drain before full revision delivery resumes.
-Pong delay provides an indirect lag signal when socket buffers hide a slow
-reader; network delay can also trigger it. During catch-up, sending waits for
-the next completed probe or at most 0.5 seconds before draining a backlog,
-rather than before every individual update. Finals take priority;
-provisional-only backlog waits until its oldest entry has been queued for one
-second, allowing newer revisions to replace it. After four finals, a ready
-active revision gets a turn. After catch-up expires and any
-queue-pressure backlog drains, full-update FIFO delivery resumes.
+All live replay uses individual `CAPTION_UPDATE` messages; `HISTORY` is reserved
+for the response to `CLIENT_HELLO`. Four consecutive finals allow a ready active
+update a turn. Active updates have a one-second grace period. During lag,
+sending waits for a completed probe before each window of up to 64 updates,
+or until sent bytes reach 256 KiB; a single caption can cross the byte threshold.
+The next window waits for another completed probe instead of feeding a stalled
+transport periodically. The probe's terminal deadline and cleanup bound that wait.
+The sender resolves a message's sequence before sending and commits progress
+after success. Once replay catches up, active work drains and lag clears, a
+non-yielding transition restores normal FIFO delivery.
 
-The soft threshold is 256 pending updates; crossing it or exceeding the byte
-budget activates compaction until the backlog drains. Hard
-limits are 4096 pending finals, 4000 active segments and 4 MiB of pending JSON.
-If useful state still exceeds these limits after compaction, the buffer stops
-accepting updates and requests closure with code 1013. Active segments are not
-evicted to make room. Live delivery always uses individual `CAPTION_UPDATE`
-messages; `HISTORY` is reserved for the response to `CLIENT_HELLO`. One in-flight
-send and WebSocket/TCP buffers lie outside the pending limits. Pong lag alone
-does not force a reconnect for history catch-up; WebSocket keepalive still
-closes connections that stop responding.
+One probe task times ping initiation plus its matching pong, so a ping blocked
+by write backpressure is covered too. A round trip overdue by
+`max(0.5 s, 6 * RTT)` starts catch-up with an initial three-second lease;
+it can already trigger replay through the sender. If a normal-mode trial
+quickly overloads the receiver again, the lease doubles up to 30 seconds. A
+sustained healthy full-rate trial resets it; an isolated long probe does not
+by itself extend the lease. This reduces repeated full-stream flooding, at
+the cost of slower provisional-coverage restoration after recurring lag.
+At `max(1.5 s, 18 * RTT)`, the probe also forces replay.
+Successful late pongs update smoothed RTT with weight 0.25, capping each sample
+at the current behind threshold. Pong timing remains an indirect lag signal.
+`asyncio.wait` bounds waits without cancelling the shared probe; cleanup cancels
+and joins owned tasks. The server's built-in heartbeat is disabled.
 
-Reconnect requests recent finals through `HISTORY`, avoiding individual replay
-of obsolete revisions. Recovery remains limited to the requested window; closure
-does not guarantee every queued final is recoverable. The policy aims for rapid
-convergence after temporary pressure, while sustained overload and lag-detection
-accuracy require the experiments in Section 4; implementation alone does not
-establish performance.
+Each complete probe or socket send has a 75-second terminal stall budget,
+below the 90-second log horizon. A closing handshake is bounded to two seconds,
+then the transport is aborted. Expired outstanding finals, exhausted active
+capacity, or terminal stalls are explicit failure conditions, not lossless
+recovery claims. Genuine reconnect still retrieves only requested recent
+context. These finite bounds and the new replay policy require the experiments
+in Section 4; earlier reconnect-policy measurements do not establish current
+performance.
 
 ## 4. Public experiments and results
 

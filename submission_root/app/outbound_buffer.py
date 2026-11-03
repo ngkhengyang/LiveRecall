@@ -18,17 +18,19 @@ from .protocol import CaptionUpdate
 class OutboundBuffer:
     """Independent limits for pending finals, active segments, and wire bytes.
 
-    A 256-update backlog or byte pressure activates coalescing
+    A 256-update backlog or byte pressure activates coalescing and replay
     until the queue drains. Client lag can also enable coalescing explicitly.
-    Exceeding a hard limit after compaction refuses new work and requests an
-    explicit connection failure; reconnect cannot recover arbitrary old finals
-    outside the shared history window.
+    Exceeding a hard limit after compaction refuses new buffered work. The
+    owning Client can switch finals to shared-log replay instead of closing.
+    Latest active state still has to fit within the per-client limits.
     """
 
     MAX_PENDING_UPDATES = 256  # Soft threshold for semantic catch-up delivery.
     MAX_PENDING_FINALS = 4096
     MAX_PENDING_ACTIVE_SEGMENTS = 4000
     MAX_PENDING_BYTES = 4 * 1024 * 1024
+    MAX_BATCH_ITEMS = 64
+    MAX_BATCH_BYTES = 256 * 1024
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
@@ -137,6 +139,26 @@ class OutboundBuffer:
             self._by_segment[update.segment] = key
         self._active_count = active_count
         self._pending_bytes = pending_bytes
+
+    def begin_replay(self) -> None:
+        """Keep latest active state; the shared log now owns pending finals.
+
+        The sender may still own an in-flight message. It must commit that
+        message's delivery cursor before fetching the next shared-log batch.
+        """
+        self._overloaded = True
+        self._compact()
+        for key, update in list(self._pending.items()):
+            if update.final:
+                self._take(key)
+        self._pressure_active = False
+        self._should_close = False
+
+    def discard_segment(self, segment: int) -> None:
+        """Remove an active entry once its final is available in the log."""
+        key = self._by_segment.get(segment)
+        if key is not None:
+            self._take(key)
 
     def _compact(self) -> None:
         """Keep each segment's latest state in its original queue position.

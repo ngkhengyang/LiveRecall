@@ -1,10 +1,9 @@
 # OOP design: Server / Source / Client for solution_server.py
 
-**Status: as-built.** This was written as a design spec before implementation; it now
-describes the code that is in `submission_root/app/`. Sections marked
-*"changed during implementation"* record where measurement contradicted the original
-design — those are the parts worth reading before the viva, because they are the ones
-we can defend with evidence rather than intent.
+**Status: current architecture with a separate historical-results section.** The
+component and API descriptions match `submission_root/app/`'s connected shared-log
+replay design. Earlier reconnect-policy measurements are retained below as historical
+notes; they are not verification or benchmark results for the current implementation.
 
 ## Context
 
@@ -68,9 +67,10 @@ Server  --owns------>  CaptionStore   (one instance; pure logic, no networking)
 Client  --owns------>  OutboundBuffer (one instance per client; pure logic, no networking)
 
 Source  --delegates to-->  Server.ingest_caption_update(update: CaptionUpdate)
-Server  --delegates to-->  CaptionStore.validate_and_apply(update) / .compute_history(...)
+Server  --delegates to-->  CaptionStore.validate_and_apply(update) / .history_snapshot(...)
 Server  --pushes into-->   Client.enqueue(update: CaptionUpdate)   (never awaits a socket)
 Client  --delegates to-->  OutboundBuffer.offer(update) / .next_update(...)
+Client  --reads via Server--> CaptionStore.read_final_batch(...)  (shared replay log)
 ```
 
 `CaptionUpdate` is the one message type that flows through almost the entire system
@@ -113,9 +113,9 @@ update object is fanned out to every connected client, so without this the serve
 the frozen instance and lives outside the dataclass fields, so it never affects equality
 or `repr`. This is a clean, cheap item for the report's required before/after comparison.
 
-**The one unavoidable raw-dict touch**: `Server._accept` must peek `raw.get("type")` to
-know *which* class's `from_dict` to call for the opening hello — inherent to any JSON
-tagged-union protocol, OOP or not. Everything past that first peek is a typed object.
+**Message dispatch**: `Server._accept` inspects `raw.get("type")` before choosing an
+opening-hello class; `Source.run` also dispatches producer message tags. After parsing,
+the state and delivery layers exchange typed objects.
 
 ## `CaptionStore` (pure logic — owned by `Server`)
 
@@ -123,15 +123,20 @@ No `ws`, no `asyncio`, no `await` anywhere in this class. Constructed once by `S
 
 **Attributes**
 - `self._segments: dict[int, SegmentState]` — current winning state per segment.
-- `self._final_history: collections.deque[SegmentState]` — bounded, ordered
-  oldest→newest; the recovery/HISTORY source.
-- `self._retired_before: int` — watermark; see boundedness below.
+- `self._final_history: dict[int, SegmentState]` — insertion-ordered, keyed by a
+  contiguous accepted-final sequence; shared by context recovery and connected replay.
+- `self._final_tail` — last accepted final sequence, even if that final has expired.
+- `self._evicted_final_sequence` — last expired final sequence; detects missing replay
+  prefixes even when the log is empty.
+- `self._retired_before: int` — source-segment retirement watermark; separate from the
+  replay watermark because unfinished-segment eviction also advances it.
 - `self._active_segments: set[int]` — unfinished IDs only; finals are not subject
   to this count backstop.
 - Class constants: `HISTORY_HORIZON_SECONDS = 90.0`, `MAX_ACTIVE_SEGMENTS = 4000`.
 
 **`SegmentState`** — *composed* from a `CaptionUpdate` rather than subclassing it:
-`@dataclass(frozen=True) class SegmentState: update: CaptionUpdate; received_at: float`,
+`@dataclass(frozen=True) class SegmentState: update: CaptionUpdate; received_at: float;
+final_sequence: int = 0`,
 with `segment`/`revision`/`final` convenience properties. Never leaves `CaptionStore`.
 
 **Public methods**
@@ -141,19 +146,33 @@ with `segment`/`revision`/`final` convenience properties. Never leaves `CaptionS
      regardless of the incoming revision number;
   3. reject if `update.revision <= existing.revision` (covers duplicates and stale/
      out-of-order in one rule);
-  4. otherwise store, and if final append to `_final_history` and trim. Returns the
-     update as the caller's confirmation that it was accepted.
+  4. otherwise store, and if final allocate the next sequence, append to
+     `_final_history`, and trim. Returns the accepted update.
 - `compute_history(last_segment, last_revision, history_seconds=60) -> list[CaptionUpdate]`
   — finalized entries after the cursor inside the requested window, oldest-first.
+- `history_snapshot(...) -> (items, tail)` — requested context and its final-log
+  boundary captured synchronously. The captured tail must not be replaced by a tail
+  read after awaiting the HISTORY send.
+- `final_tail` — current accepted-final sequence watermark.
+- `final_sequence(update) -> int` — resolves a retained matching final before its
+  send; absence or mismatch raises `ReplayExpired`.
+- `read_final_batch(after_sequence, max_items, max_bytes) -> (items, next_sequence)`
+  — bounded continuous delivery after the cursor, independent of the requested
+  context window. It accounts for HISTORY framing/separators and returns a single
+  oversized item alone for ordinary CAPTION_UPDATE fallback. An expired prefix raises
+  `ReplayExpired` rather than silently skipping ahead. Indexed sequence reads avoid
+  copying a complete per-client history snapshot for every batch.
 
 **Corrected during region A review: honor `history_seconds`.** Client parsing clamps
 the requested window to 0--60 seconds, and the client handler forwards it to the store.
 The previous implementation returned the whole retained window, spending bandwidth
 on unrequested context. Recovery now filters by both cursor and elapsed time since
 server acceptance. Storage remains 90 seconds, but replies respect the requested
-window. History is trimmed on recovery and every update, including provisional
-updates, so an idle source cannot leave expired history in the next response.
+window. History is trimmed on recovery, replay reads and every update, including
+provisional updates, so an idle source cannot leave expired history in the next response.
 A zero-second request returns empty history; missing/invalid requests default to 30.
+Connected replay can still deliver a 65-second-old owed final while it remains in the
+90-second shared log. This does not enlarge a genuine reconnect's requested context.
 
 **Changed during implementation — bounding `_segments`.** The original spec bounded
 `_final_history` but left `_segments` growing one entry per segment forever, which fails
@@ -181,10 +200,13 @@ behavior below is testable without real time passing.
 - `self._queued_at: dict[int, float]` — the enqueue time for each queue ID.
 - `self._by_segment: dict[int, int]` — segment-to-queue-ID index used only while
   coalescing; each segment then has exactly one pending entry.
-- `MAX_PENDING_UPDATES = 256` — soft backlog threshold activating compaction
-  until the queue drains.
-- Hard bounds: 4096 pending finals, 4000 active segments and 4 MiB pending JSON.
-- `self._should_close`, exposed as the public read-only `should_close` property.
+- `MAX_PENDING_UPDATES = 256` — soft backlog threshold activating compaction and
+  shared-log catch-up until the queue drains.
+- Buffer admission bounds: 4096 pending finals, 4000 active segments and 4 MiB pending
+  JSON. Client-side replay moves final ownership to the shared log; latest active
+  state remains locally bounded.
+- `self._should_close`, exposed as `should_close`, flags admission failure. `Client`
+  first attempts shared-log replay; persistent active-state overflow remains terminal.
 
 **Public methods**
 - `set_overloaded(bool)` — applies the client's lag verdict, compacting an existing
@@ -192,10 +214,15 @@ behavior below is testable without real time passing.
   unless queue pressure remains active.
 - `offer(update)` — append every revision normally; replace a superseded revision
   only during overload. Check hard limits after any pressure-triggered compaction.
+- `begin_replay()` — compact, remove pending finals now owned by the shared log,
+  clear queue-pressure/admission failure, and retain only latest active state. The
+  sender separately retains any in-flight message until it finishes.
+- `discard_segment(segment)` — remove queued active state once its final is in the log.
 - `has_pending()`, and the `pending` / `pending_bytes` / `coalesced` / `rejected`
   counters (coalesced/rejected counts are printed on disconnect).
 - `next_update(prefer_final=False, provisional_grace=0.0) -> CaptionUpdate | None` —
-  see "Slow readers" for why the two arguments exist.
+  normal FIFO or coalesced selection; replay uses `take_active_update(grace)` locally
+  and reads one final at a time through `Server.read_final_batch`.
 
 **Private helper**
 - `_compact()` — discard only superseded provisional revisions, retaining each
@@ -208,12 +235,13 @@ behavior below is testable without real time passing.
   moving the retained queue slot or restarting its provisional grace period.
 - `CaptionStore` validates revision monotonicity and final durability before enqueue,
   so compaction can retain the last accepted state of each segment safely.
-- Once a pressure backlog drains and client lag clears, normal full-update delivery
-  resumes automatically. All live deliveries remain individual `CAPTION_UPDATE`s.
-- Hard overflow requests explicit closure instead of evicting a final or the latest
-  active state. Subsequent offers are rejected while the sender closes. Recovery is
-  limited to the requested recent-history window; it cannot guarantee arbitrarily
-  old unsent finals after closure.
+- Soft pressure switches delivery to shared-log replay instead of treating a full
+  local final queue as a reason to disconnect. Only latest active state remains local.
+- Once the replay cursor reaches the shared tail, active work drains and lag clears,
+  normal full-update delivery resumes without yielding during the transition.
+- A replay-horizon gap, active-state exhaustion or terminal stall is an explicit
+  capacity/failure boundary. Actual reconnect remains recent-context recovery;
+  persistent reconnect sessions and application ACKs are not implemented.
 
 ## `Server`
 
@@ -221,12 +249,14 @@ behavior below is testable without real time passing.
 
 **Public methods**
 - `async run(self)` — `websockets.serve(self._accept, host, port, max_size=2**20,
-  ping_interval=20, ping_timeout=20)`, awaits forever.
+  ping_interval=None)`, awaits forever. Built-in heartbeat is disabled because each
+  receiver's custom probe owns the bounded heartbeat and catch-up policy.
 - `async _accept(self, ws)` — reads the first message with a 5 s timeout, JSON-decodes,
   peeks `raw.get("type")`, constructs and runs a `Source` or a `Client`; anything else
   (bad JSON, timeout, non-object, unknown type, failed `from_dict`) closes with 1008.
 - `register_client` / `unregister_client` / `client_count`.
-- `compute_history(...)` — delegates straight to the store.
+- `compute_history`, `history_snapshot`, `final_tail`, `final_sequence`,
+  `read_final_batch` — delegate directly to the shared store.
 - `ingest_caption_update(update)` — validate, and broadcast only if accepted.
 - `broadcast(update)` — `for client in self._clients: client.enqueue(update)`. Never
   awaits a socket. This one line is *why* slow-client isolation holds. It is also why no
@@ -253,27 +283,74 @@ is never blocked by any client's network speed.
 ## `Client`
 
 **Constructor / attributes**: `ws`, `server`, `hello: ClientHello`, one `OutboundBuffer`,
-a `_wake` event, a `_probe_tick` event, and the catch-up state (`_catchup_until`, `_rtt`).
+`_wake` and `_probe_tick` events, `_catchup_until`, smoothed `_rtt`, one
+`_pending_probe` task, `_replaying`, and `_last_sent_final_sequence`. `_in_flight`
+belongs to the single sender; its cursor is committed only after a successful send.
 
 **`async run(self)`**:
 1. `self.server.register_client(self)` — **before** step 2, not after
-2. `items = self.server.compute_history(hello.last_segment, hello.last_revision, hello.history_seconds)`
-3. `await self.ws.send(History(items).to_json())`
-4. start `_sender_loop()` **and** `_probe_loop()` — after the HISTORY send, so HISTORY is
-   always the first frame
-5. `async for _ in self.ws: pass` — detects disconnect, lets keepalive run
+2. `(items, snapshot_tail) = server.history_snapshot(...)`, with no intervening await
+3. `await self._send(History(items))`; return if the bounded send fails
+4. initialize the delivery cursor to **the captured** `snapshot_tail`, then start
+   `_sender_loop()` and `_probe_loop()`; HISTORY is always first
+5. `async for _ in self.ws: pass` — detects disconnect
 6. `finally:` cancel both tasks, await them, `unregister_client`
 
-**`enqueue(update)`** — `buffer.offer(update)` then `_wake.set()`. Never blocks, never
-awaits.
+**`enqueue(update)`** never awaits. In normal mode it offers to the FIFO and enters
+replay on pressure/admission failure. In replay, a new final only removes that segment's
+active entry and wakes the sender; the shared log owns its final. Provisionals update
+the bounded latest-active buffer. A refused provisional is retried after the replay
+transition releases local final entries.
 
-**Tasks owned**: `run()` (receive/keepalive), `_sender_loop()` (drains the buffer), and
-`_probe_loop()` (measures consumption). The third task was **not** in the original design
-— see below.
+**`_next_delivery()`** selects a message together with its sequence watermark. Normal
+delivery takes a FIFO update and resolves a final's sequence before sending. Catch-up
+reads one final after the committed cursor and sends it as `CAPTION_UPDATE`.
+`HISTORY` is sent only in response to `CLIENT_HELLO`. After four consecutive finals,
+a ready active update gets a turn. Active state has a one-second provisional grace.
+When the log is caught up, active work is empty and lag clears, the sender atomically
+returns to normal mode. `ReplayExpired` explicitly fails a missing retained prefix.
+
+**`_sender_loop()`** remains the only caption sender. A mode change during an in-flight
+send cannot start a competing replay. It awaits `_send`, commits the selected cursor
+on success, and only then selects another update. Send completion is not an application
+ACK; this cursor is scoped to the current ordered WebSocket connection.
+
+**`_probe_loop()`** owns one `_round_trip()` task, including both `await ws.ping()` and
+its matching pong wait. `asyncio.wait` applies deadlines without cancelling the child
+on timeout and preserves caller cancellation; owned tasks are cancelled and joined on
+cleanup. An overdue round trip at `max(0.5 s, 6 * RTT)` renews three seconds of catch-up,
+which can already activate replay through the sender. The probe forces replay at
+`max(1.5 s, 18 * RTT)`. These are catch-up deadlines, not reconnect deadlines. Timely
+and late successful pongs update RTT with weight 0.25, capping each sample at the
+current behind threshold. The probe pauses 250 ms after completion. Pong timing is
+an indirect connection-lag signal, not proof of application consumption.
+
+**Finite failure policy**: each complete probe and socket send has a 75-second stall
+budget; `_send()` also covers initial HISTORY. `_close()` allows two seconds for the
+closing handshake, then aborts the transport. This bounds blocked ping initiation,
+blocked sends and closing, not just the pong wait. A sender in catch-up waits for
+the next completed probe before each window of up to 64 updates or until sent
+bytes reach 256 KiB (one caption can cross that byte threshold), rather than
+feeding a stalled transport periodically;
+the probe's terminal deadline and cleanup release bound that wait. Outstanding finals can outlive
+the requested 60-second context window while retained in the shared 90-second log,
+but horizon expiry, persistent active-state overflow and terminal stalls remain
+explicit failures. Genuine reconnect has no persistent delivery session and uses the
+required recent-context cursor; application ACK/credit flow control is not implemented.
+
+Current catch-up uses an adaptive lease: it starts at 3 seconds, doubles
+on quickly recurring lag after a full-update trial, and is capped at 30
+seconds. A sustained healthy normal trial resets it. A single long probe
+does not itself increase the lease. This avoids repeated full-stream
+flooding of persistently slow readers; provisional coverage can take longer
+to resume after repeated lag. The controller uses monotonic timings.
+
+**Tasks owned**: `run()` (receive), `_sender_loop()` (normal/replay delivery),
+`_probe_loop()` (bounded heartbeat), and their short-lived send/probe/close tasks.
 
 ## The one race condition that must be gotten right: reconnect vs. a live final
 
-**Rule: `register_client` must execute before `compute_history`, with no `await` between
+**Rule: `register_client` must execute before `history_snapshot`, with no `await` between
 them** (`Client.run()` steps 1 and 2, back-to-back, both synchronous).
 
 - If registration happened *after* the history snapshot, a final arriving at the Server in
@@ -281,147 +358,65 @@ them** (`Client.run()` steps 1 and 2, back-to-back, both synchronous).
   simply never called for it, a silent gap.
 - The reverse risk — a final landing in *both* the HISTORY snapshot and a subsequent live
   `enqueue` — can't happen: `validate_and_apply`'s final-durability rule guarantees a
-  segment is written to `_final_history` at most once, and nothing ever re-broadcasts an
-  already-finalized segment. So a given final is either already in `_final_history` when
-  `compute_history` reads it (delivered via HISTORY only) or becomes final strictly
-  afterward (delivered live only) — never both.
+  segment is written to `_final_history` at most once. Snapshot context is sent before
+  live delivery, and the committed captured tail excludes those snapshot finals from
+  connected replay. Arrivals during the HISTORY send have larger final sequences and
+  remain eligible. Even empty or zero-second context must use the captured tail so old
+  unrequested finals are not replayed.
 - Keeping both calls synchronous closes the remaining theoretical window: within one
   asyncio event loop, nothing (including `Source.run → broadcast`) can interleave between
   two back-to-back non-awaiting calls.
 
-This is directly confirmed by the harness: `test/load_clients.py` classifies a repeated
-`(segment, revision)` as `duplicate` and a lower one as `stale`, and every public run
-reports **0 duplicates, 0 stale**, including T4 with 20% of clients disconnecting.
+The harness classifies a repeated `(segment, revision)` as duplicate and a lower one as
+stale. Current correctness and performance must be verified against the current code;
+the earlier public-run numbers below belong to the superseded reconnect policy.
 
 ---
 
-# Slow readers: what measurement changed
+## Historical measurements: superseded reconnect policy
 
-**This section did not exist in the original design, and it is the single biggest
-correction measurement forced on us.** Everything above was written assuming that a slow
-reader eventually makes `ws.send()` push back, filling `OutboundBuffer` and triggering
-coalescing. That assumption is false, and the original design scored **95.13% Final
-Caption Completeness on T3 — below the 99% correctness gate**, which alone would cap the
-hidden-performance section at 15/30.
+The following numbers were recorded in earlier design notes for a different delivery
+policy. That implementation closed lagging connections at an adaptive 1.5-second-floor
+resync deadline and relied on recent HISTORY recovery. It also used different local
+buffer limits and probe timeout handling. **These are historical observations, not
+results for the current connected shared-log replay implementation.** No current
+performance claim should be inferred from them; the report requires new independent
+runs with implementation commit and evidence paths.
 
-## Finding 1: there is no send-side backpressure signal at all
+Earlier experiments found that the small public stream could fit in downstream buffers
+without visible server write pressure. Pong delays then provided an indirect lag signal
+for the Python slow-reader clients. This observation motivated detection and pacing,
+but it did not prove application consumption or apply to every transport workload.
+Current probes time ping initiation too, because `ping()` itself may block on writing.
 
-With one slow reader (500 ms between reads) and the public workload:
+Recorded historical T3 optimization comparison (100 clients, 10% slow, 500 ms reads,
+60 seconds), retained to explain the abandoned reconnect-based trade-off:
 
-- `ws.transport.get_write_buffer_size()` stayed at **0** for the entire 60 s run.
-- The server's own counters reported **`coalesced=0, dropped=0`** — `OutboundBuffer` was
-  never non-empty, so the coalescing logic above never executed once.
-
-The cause is simply volume: 76 segments × 3 revisions × ~150 bytes is about **34 KB**,
-which fits entirely inside kernel socket buffers plus the client library's inbound queue.
-TCP never pushes back, so `send()` never blocks. The backlog is real but completely
-invisible to the application. A design that waits for `send()` to signal pressure will
-coalesce nothing, and the slow client spends its limited read budget on provisional
-revisions that were obsolete before it got to them: it read 119 messages and only **39**
-of them were finals.
-
-## Finding 2: ping/pong does expose it
-
-The client library stops reading from its transport once its own inbound queue is full,
-so pongs stall under exactly the condition we care about. Measured on the same run:
-
-```
-t= 7.5s  write_buf=0   ping_rtt=0.5 ms
-t=18.1s  write_buf=0   ping_rtt=timeout (>3 s)
-t=26.1s  write_buf=0   ping_rtt=442.8 ms
-t=36.6s  write_buf=0   ping_rtt=timeout (>3 s)
-```
-
-`write_buf` is flat at 0 throughout; RTT moves three orders of magnitude. That is the
-signal.
-
-## Finding 3: there is a ~17 second blind window
-
-The client's queue only fills at the rate production exceeds consumption (4/s vs 2/s), so
-it takes roughly 17 s before pongs stall. Tracing what the client actually received, it
-got all three revisions of every segment from t=0.5 s to t=17.1 s — the full uncoalesced
-stream — before any mechanism could engage. Starting clients pessimistically does **not**
-fix this: a slow client's pongs are genuinely fast until its queue fills, so it is
-indistinguishable from a healthy one during that window.
-
-## What the `Client` does about it
-
-Three mechanisms, in the order they engage:
-
-1. **Detect** — `_probe_loop()` keeps exactly one ping in flight (`PROBE_INTERVAL_SECONDS
-   = 0.25`). One overdue pong raises catch-up for `CATCHUP_STICKY_SECONDS = 3.0`. Only
-   this task sends consumption probes. While that pong remains overdue, catch-up is
-   refreshed every 0.5 seconds without issuing more probes or forcing a reconnect.
-   After a late pong, catch-up lasts at least three seconds or that pong's measured
-   delay, whichever is longer, so downstream backlog has time to drain.
-2. **Hold** — while in catch-up, `_hold()` waits for the next completed probe (capped by
-   `MAX_HOLD_SECONDS = 0.5`) once before draining a backlog. Updates coalesce during
-   the hold; individual finals do not each incur a separate wait. A client that
-   is keeping up never holds.
-3. **Prioritize** — `next_update(prefer_final=True,
-   provisional_grace=PROVISIONAL_GRACE_SECONDS = 1.0)` takes the
-   oldest *final* ahead of any provisional, and withholds a lone provisional for 1 s.
-   Under the deterministic source a segment finalizes in ~0.4 s, so the provisional is
-   normally replaced in place by its own final and one message carries what three would
-   have. Nothing is discarded: a segment that genuinely stays open past the grace is
-   released once ready. After four finals, a ready active revision gets a turn.
-   `HISTORY` is sent only in response to `CLIENT_HELLO`; live catch-up uses
-   individual `CAPTION_UPDATE`s. Hard buffer overflow and WebSocket keepalive
-   retain their connection-failure behavior.
-
-The lag threshold is `max(0.5 s, 6 * smoothed RTT)`, so a link with real delay
-is judged against what is normal for that link.
-
-## Honest attribution — what actually moved the number
-
-**Historical measurements below predate the live-delivery protocol correction.**
-The old routine resync policy has been removed; these results do not validate
-the current implementation and must be rerun for the report.
-
-Each step was measured on T3 (100 clients, 10% slow at 500 ms, 60 s). Not every idea paid
-off, and the table matters more than the narrative:
-
-| change | Final completeness |
+| Previous-policy change | Recorded final completeness |
 |---|---|
 | original design (no probe) | 95.13% |
-| + detect & hold (1, 2) | 99.07% |
-| + hysteresis, finals-first, grace, pessimistic start | 98.75 – 98.93% |
-| + sticky catch-up alone | **96.18%** — worse |
-| + resync at 4.0 s | 98.80% |
-| + resync at 1.5 s | **99.99%** |
-| + adaptive RTT thresholds | 99.91 – 99.93% |
+| + detect and hold | 99.07% |
+| + hysteresis, finals-first, grace, pessimistic start | 98.75–98.93% |
+| + sticky catch-up alone | 96.18% |
+| + reconnect resync at 4.0 s | 98.80% |
+| + reconnect resync at 1.5 s | 99.99% |
+| + adaptive RTT thresholds | 99.91–99.93% |
 
-Two changes carried it: **detect+hold** (95 → 99.07) and **resync** (99.07 → 99.9+). The
-middle block roughly cancelled out — finals-first and the grace window are defensible on
-their own terms and cost nothing, but they did not earn the number. Sticky catch-up
-*hurt* in isolation, and only became useful once resync existed to stop a stalled reader
-draining a stale queue.
+The old 1.5-second reconnect floor is now an early replay threshold, not the terminal
+stall deadline. Its recorded score cannot be attributed to the current policy.
 
-The historical resync results relied on reconnect recovery and are not a basis
-for tuning the current live-delivery policy.
+Recorded historical public runs (one run each, not the required three-run medians):
 
----
-
-## Measured results (public tests, 1 run each; use `--runs 3` for the report)
-
-These are also historical results from before the protocol correction.
-
-| | Duplicates | Stale | Final completeness | Normal Update Coverage | P50 | P95 |
+| Previous-policy test | Duplicates | Stale | Final completeness | Coverage | P50 | P95 |
 |---|---|---|---|---|---|---|
 | T1 basic (20 clients) | 0 | 0 | 100% | 100% | 4.7 ms | 7.4 ms |
 | T2 scale (100 clients) | 0 | 0 | 100% | 100% | 13.5 ms | 24.7 ms |
-| T3 slow (10% @ 500 ms) | 0 | 0 | 99.91% | 94.9% | 13.3 ms | 439 ms |
+| T3 slow (10% at 500 ms) | 0 | 0 | 99.91% | 94.9% | 13.3 ms | 439 ms |
 | T4 reconnect (20%) | 0 | 0 | 100% | 97.4% | 13.7 ms | 26.2 ms |
 | late join (20%) | 0 | 0 | 100% | 93.3% | 3.8 ms | 6.2 ms |
 
-Slow-reader isolation on T3: normal clients hold **P95 ≈ 21 ms, 100% fresh** while slow
-clients degrade — which is the point of the mechanism. The sub-100% coverage figures on
-T3/T4/late-join are the revisions a disconnected or overloaded client provably could not
-have received, which the spec permits; coverage is 100% whenever no client is impaired.
-
-T5 (`tc/netem`) has **not** been run — it needs `sudo` on a real Ubuntu VM, and WSL is not
-the reference grading environment. Run `make t5-network-enable` → `make t5-network` →
-`make t5-network-reset` there.
+The earlier notes recorded no T5 run. Establish current T1–T5 coverage and before/after
+results from new artifacts rather than carrying these values into the report.
 
 ## How this maps onto a 4-person split
 
@@ -442,20 +437,21 @@ the reference grading environment. Run `make t5-network-enable` → `make t5-net
 
 ## Verification
 
-Design-level, by hand against `docs/PROTOCOL_EXAMPLES.md` (normal connection,
-disconnect/reconnect, late join): no scenario produces a duplicate or missed final;
-nothing reads `CaptionStore`/`OutboundBuffer` except through its owning actor; every bound
-is named, finite and justified.
+`test/test_delivery.py` contains regression scenarios for shared-log expiry and batch
+bounds, empty-context subscription boundaries, final pressure switching to replay,
+in-flight cursor ownership, normal revision coverage and restoration after catch-up,
+initial-HISTORY races, and bounded ping/pong/close cleanup. It includes an opt-in real
+65-second transport-stall scenario. Read its run instructions and record actual outcomes
+for the implementation commit being evaluated; the existence of these tests is not a
+claim that current public or hidden workloads have passed.
 
-As implemented:
-- `CaptionStore` and `OutboundBuffer` have standalone assertion suites covering
-  duplicate/stale/final-durability, history trimming and segment retirement, coalescing
-  with FIFO-slot preservation, provisional eviction, finals-first draining, and the grace
-  window — all with an injected clock and no asyncio.
-- `protocol.py` round-trips and rejects malformed input (missing field, wrong type,
-  `bool`-as-int, non-positive segment/revision).
-- `client/app.js` is exercised under a DOM stub: three revisions render as one line, a
-  final is never overwritten, and the 15/30/60 s windows resolve from local state with
-  zero additional server requests.
-- End-to-end: `test/run_demo.py` for T1–T4 plus a late-join run, and
-  `test/submission_check.py` for the required startup path.
+`test/test_live_delivery.py` additionally verifies individual live frames,
+latest-active fairness, bounded probe windows and exactly one initial HISTORY
+under real WebSocket queue pressure.
+
+Use `test/submission_check.py` for entry-point compatibility and the unchanged public
+harness for T1–T5. Run each reported experiment at least three independent times and
+report medians, normal/slow splits, completeness, freshness, coverage and recovery.
+Check network impairment and memory limits in the required Ubuntu environment. Browser
+revision replacement, local recall, late join and actual reconnect remain separate
+application-demonstration checks.

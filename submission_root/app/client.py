@@ -1,34 +1,9 @@
-"""One browser / load-test client connection.
+"""One receiver, with independent sending and bounded connected catch-up.
 
-A thin connection wrapper around one :class:`OutboundBuffer`, plus the tasks
-the design calls for: the ``run`` loop that watches for disconnect, an
-independent ``_sender_loop`` that drains the buffer, and a ``_probe_loop`` that
-measures whether this client is actually consuming what it is sent.
-
-Keeping the sender separate from ``run`` is what lets ``Server.broadcast`` hand
-this client work without ever awaiting its socket.
-
-Why the probe loop exists
--------------------------
-A slow reader produces no send-side signal at all. Measured on loopback with
-the public workload, ``transport.get_write_buffer_size()`` stays at 0 for the
-entire run and ``ws.send`` never blocks: the whole caption stream is small
-enough to sit in kernel socket buffers, so the backlog is invisible and the
-outbound buffer never fills. A design that waits for ``send`` to push back
-therefore never coalesces anything, and a slow client spends its limited read
-budget on obsolete provisional revisions instead of finals.
-
-WebSocket ping/pong does expose it. The client library stops reading from the
-transport once its own inbound queue is full, so its pong is delayed by exactly
-the condition we care about -- the application is not keeping up. The same
-measurement showed pong latency moving from 0.5 ms to repeated multi-second
-timeouts as soon as the reader fell behind.
-
-So this client pings continuously, and while a pong is overdue the sender holds
-off instead of pushing more. That hold is what lets superseded provisional
-revisions collapse in :class:`OutboundBuffer` rather than queue downstream, and
-it paces delivery to what the client is demonstrably consuming. A client that
-is keeping up never waits, so normal clients pay nothing for it.
+Normal delivery preserves every revision. Behind receivers replay finals from
+the shared rolling log and keep only latest active state locally. One sender
+owns the in-flight message and advances a log cursor only after sending it.
+Ping timing is an indirect lag signal, not an application acknowledgement.
 """
 
 from __future__ import annotations
@@ -39,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from websockets.exceptions import ConnectionClosed
 
+from .caption_store import ReplayExpired
 from .outbound_buffer import OutboundBuffer
 from .protocol import CaptionUpdate, ClientHello, History
 
@@ -53,24 +29,29 @@ class Client:
 
     # Gap between consumption probes.
     PROBE_INTERVAL_SECONDS = 0.25
-    # The lag threshold is also scaled against this
+    # Floors for the two verdicts below. Both are also scaled against this
     # connection's own measured round trip, so a link with real delay and
     # jitter is judged against what is normal *for that link* rather than
     # against a loopback constant. The supplied impairment profile alone is
     # 120 ms +/- 30 ms with 3% loss, which a fixed threshold would read as a
     # stalled reader.
     BEHIND_AFTER_SECONDS = 0.5
-    # Upper bound on one hold. A client that never recovers still makes
-    # forward progress on finals instead of stalling outright.
-    MAX_HOLD_SECONDS = 0.5
-    # Minimum catch-up time after an overdue pong. A reader
+    # How long one overdue pong keeps this client in catch-up mode. A reader
     # that is behind drains just enough to answer a ping and then falls back,
     # so without a sticky window the sender resumes flooding the moment a
     # single pong lands and the client spends its read budget on revisions
     # that are obsolete by the time it reaches them.
     CATCHUP_STICKY_SECONDS = 3.0
+    MAX_CATCHUP_SECONDS = 30.0
+    # Persistent lag escalates to shared-log replay, not a routine reconnect.
+    REPLAY_AFTER_SECONDS = 1.5
     BEHIND_RTT_MULTIPLIER = 6.0
+    REPLAY_RTT_MULTIPLIER = 18.0
     RTT_SMOOTHING = 0.25
+    # Finite stall budget, below the shared log's 90-second retention horizon.
+    # Includes ping initiation and socket sends, not only the pong wait.
+    MAX_STALL_SECONDS = 75.0
+    CLOSE_TIMEOUT_SECONDS = 2.0
     # While behind, hold a lone provisional revision this long before sending
     # it. The deterministic source finalizes a segment in about 0.4 s, so the
     # revision is normally replaced in place by its own final and one message
@@ -91,9 +72,18 @@ class Client:
         self._finals_since_active = 0
         self._in_flight: CaptionUpdate | None = None
         self._tasks: list[asyncio.Task] = []
+        self._pending_probe: asyncio.Task | None = None
+        self._last_sent_final_sequence = 0
+        self._replaying = False
+        self._catchup_lease = self.CATCHUP_STICKY_SECONDS
+        self._last_lag_delay = 0.0
+        self._normal_trial_started: float | None = None
 
     def _behind_threshold(self) -> float:
         return max(self.BEHIND_AFTER_SECONDS, self.BEHIND_RTT_MULTIPLIER * self._rtt)
+
+    def _replay_threshold(self) -> float:
+        return max(self.REPLAY_AFTER_SECONDS, self.REPLAY_RTT_MULTIPLIER * self._rtt)
 
     @property
     def _catchup(self) -> bool:
@@ -105,7 +95,7 @@ class Client:
         # method for why registration must precede the history snapshot with no
         # await in between.
         self.server.register_client(self)
-        items = self.server.compute_history(
+        items, snapshot_tail = self.server.history_snapshot(
             self.hello.last_segment,
             self.hello.last_revision,
             self.hello.history_seconds,
@@ -121,7 +111,11 @@ class Client:
             # HISTORY is always the first frame this client sees: the sender
             # task that could emit live updates does not exist until after it
             # has been sent.
-            await self.ws.send(History(items).to_json())
+            if not await self._send(History(items)):
+                return
+            # Use the captured tail, even for empty/zero-second history. Finals
+            # arriving during the send are strictly after this boundary.
+            self._last_sent_final_sequence = snapshot_tail
             self._tasks = [
                 asyncio.create_task(self._sender_loop()),
                 asyncio.create_task(self._probe_loop()),
@@ -170,8 +164,31 @@ class Client:
         Called from ``Server.broadcast``. It only mutates in-memory buffer
         state, so a stalled reader here cannot delay any other client.
         """
-        self._buffer.set_overloaded(self._catchup)
-        self._buffer.offer(update)
+        if self._replaying:
+            if update.final:
+                self._buffer.discard_segment(update.segment)
+            else:
+                self._buffer.offer(update)
+        else:
+            self._buffer.set_overloaded(self._catchup)
+            self._buffer.offer(update)
+            if self._buffer.pressured or self._buffer.should_close:
+                refused = self._buffer.should_close
+                self._enter_replay()
+                if update.final:
+                    self._buffer.discard_segment(update.segment)
+                elif refused:
+                    self._buffer.offer(update)
+        self._wake.set()
+
+    def _enter_replay(self) -> None:
+        if not self._replaying:
+            self._replaying = True
+            self._buffer.begin_replay()
+            print(
+                f"client catch-up: id={self.hello.client_id}; replaying shared finals",
+                flush=True,
+            )
         self._wake.set()
 
     # -- tasks ----------------------------------------------------------
@@ -184,103 +201,185 @@ class Client:
                 # sets the event, so an enqueue racing this clear is still seen
                 # by the has_pending check below.
                 self._wake.clear()
-                if self._catchup:
-                    # Hold once per drain, so individual finals have no fixed rate cap.
-                    await self._hold()
+                sent_items = 0
+                sent_bytes = 0
 
-                while self._buffer.has_pending():
+                while self._buffer.has_pending() or self._replaying:
                     if self._buffer.should_close:
                         break
-                    delivery = self._next_delivery()
-                    if delivery is None:
+                    if self._catchup and (
+                        sent_items == 0
+                        or sent_items >= self._buffer.MAX_BATCH_ITEMS
+                        or sent_bytes >= self._buffer.MAX_BATCH_BYTES
+                    ):
+                        # Preserve the bounded probe window, using individual live frames.
+                        await self._hold()
+                        sent_items = 0
+                        sent_bytes = 0
+                        if self._buffer.should_close:
+                            break
+                    selected = self._next_delivery()
+                    if selected is None:
                         # Only a still-fresh provisional is waiting. Leave it
                         # to be superseded; the probe loop re-wakes us so it
                         # still goes out once it ages past the grace.
                         break
+                    delivery, through_sequence = selected
                     # Dequeue transfers ownership to this in-flight message;
                     # completing send is not an application-level client ACK.
                     self._in_flight = delivery
-                    await self.ws.send(delivery.to_json())
+                    if not await self._send(delivery):
+                        return
+                    self._last_sent_final_sequence = through_sequence
                     self._in_flight = None
+                    sent_items += 1
+                    sent_bytes += len(delivery.to_json())
 
                 if self._buffer.should_close:
-                    await self.ws.close(
-                        self.TOO_FAR_BEHIND, "pending delivery capacity exhausted"
-                    )
+                    await self._close("latest active state exceeds delivery capacity")
                     return
+        except ReplayExpired:
+            await self._close("outstanding finals exceeded shared history retention")
         except ConnectionClosed:
             return
 
-    def _next_delivery(self) -> CaptionUpdate | None:
-        """Prioritize finals during catch-up; live traffic is CAPTION_UPDATE only."""
-        # Lag can change while updates are already queued. Compact that backlog
-        # on entry to catch-up, and preserve new revisions once lag clears.
-        self._buffer.set_overloaded(self._catchup)
-        catching_up = self._catchup or self._buffer.pressured
-        if catching_up and self._finals_since_active >= self.MAX_FINALS_BEFORE_ACTIVE:
+    def _next_delivery(self) -> tuple[CaptionUpdate, int] | None:
+        """Select one message and its cursor; only the sender commits progress."""
+        if not self._replaying and (self._catchup or self._buffer.pressured):
+            self._enter_replay()
+        if self._replaying:
+            # Continuing finals must not starve active segments.
+            if self._finals_since_active >= self.MAX_FINALS_BEFORE_ACTIVE:
+                active = self._buffer.take_active_update(self.PROVISIONAL_GRACE_SECONDS)
+                if active is not None:
+                    self._finals_since_active = 0
+                    return active, self._last_sent_final_sequence
+            items, through_sequence = self.server.read_final_batch(
+                self._last_sent_final_sequence,
+                1,
+                self._buffer.MAX_BATCH_BYTES,
+            )
+            if items:
+                self._finals_since_active += 1
+                return items[0], through_sequence
             active = self._buffer.take_active_update(self.PROVISIONAL_GRACE_SECONDS)
             if active is not None:
                 self._finals_since_active = 0
-                return active
-        delivery = self._buffer.next_update(
-            prefer_final=catching_up,
-            provisional_grace=self.PROVISIONAL_GRACE_SECONDS,
-        )
-        if delivery is not None:
-            if catching_up and delivery.final:
-                self._finals_since_active += 1
-            else:
+                return active, self._last_sent_final_sequence
+            # Query and transition contain no await: new arrivals cannot land
+            # between the caught-up check and resuming normal FIFO delivery.
+            if not self._catchup and not self._buffer.has_pending():
+                self._replaying = False
+                self._buffer.set_overloaded(False)
                 self._finals_since_active = 0
-        return delivery
+                self._normal_trial_started = asyncio.get_running_loop().time()
+            return None
+        delivery = self._buffer.next_update()
+        if delivery is None:
+            return None
+        through_sequence = self._last_sent_final_sequence
+        if delivery.final:
+            through_sequence = self.server.final_sequence(delivery)
+        else:
+            self._finals_since_active = 0
+        return delivery, through_sequence
+
+    async def _send(self, delivery: CaptionUpdate | History) -> bool:
+        sending = asyncio.create_task(self.ws.send(delivery.to_json()))
+        try:
+            await self._wait_task(sending, self.MAX_STALL_SECONDS)
+            return True
+        except asyncio.TimeoutError:
+            await self._close("socket send exceeded stall budget")
+            return False
+        finally:
+            await self._stop_task(sending)
+
+    async def _close(self, reason: str) -> None:
+        """Bound the closing handshake too; a dead peer may never read it."""
+        closing = asyncio.create_task(self.ws.close(self.TOO_FAR_BEHIND, reason))
+        try:
+            await self._wait_task(closing, self.CLOSE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            transport = getattr(self.ws, "transport", None)
+            if transport is not None:
+                transport.abort()
+        except ConnectionClosed:
+            pass
+        finally:
+            await self._stop_task(closing)
+
+    @staticmethod
+    async def _wait_task(task: asyncio.Task, timeout: float):
+        # asyncio.wait preserves caller cancellation even when the child finishes
+        # simultaneously (unlike wait_for on supported Python 3.10 versions).
+        # It also leaves a timed-out probe alive for the next deadline.
+        done, _ = await asyncio.wait((task,), timeout=max(0.0, timeout))
+        if not done:
+            raise asyncio.TimeoutError
+        return task.result()
+
+    @staticmethod
+    async def _stop_task(task: asyncio.Task) -> None:
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
+            await task
 
     async def _hold(self) -> None:
-        """Wait for the next completed probe, or ``MAX_HOLD_SECONDS``."""
+        """Pace replay to completed probes; their stall deadline bounds this wait."""
         self._held += 1
         self._probe_tick.clear()
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(
-                self._probe_tick.wait(), timeout=self.MAX_HOLD_SECONDS
-            )
+        await self._probe_tick.wait()
 
     async def _probe_loop(self) -> None:
-        """Keep exactly one ping in flight and publish the verdict.
+        """Time the entire probe and keep one outstanding round trip.
 
-        One overdue pong keeps catch-up active until it arrives, followed by
-        a drain window based on its delay. Timely probes let the window expire.
-        This task keeps only one consumption probe outstanding.
+        Early deadlines enable connected catch-up. The terminal deadline is a
+        finite resource/failure policy, independent of whether ping() itself
+        has returned its pong future yet.
         """
         try:
             while True:
-                pong = await self.ws.ping()
+                loop = asyncio.get_running_loop()
+                started = loop.time()
+                deadline = started + self.MAX_STALL_SECONDS
+                replay_at = started + self._replay_threshold()
+                self._pending_probe = asyncio.create_task(self._round_trip())
+                was_late = False
                 try:
-                    latency = await asyncio.wait_for(
-                        asyncio.shield(pong), timeout=self._behind_threshold()
+                    latency = await self._wait_task(
+                        self._pending_probe,
+                        min(self._behind_threshold(), self.MAX_STALL_SECONDS),
                     )
-                    # Answered promptly: fold it into this link's baseline.
-                    if isinstance(latency, (int, float)):
-                        self._rtt += self.RTT_SMOOTHING * (latency - self._rtt)
                 except asyncio.TimeoutError:
-                    # Overdue: stop pushing, then keep waiting on this pong
-                    # rather than issuing another ping behind it.
+                    was_late = True
+                    self._start_lag(loop.time())
                     while True:
-                        self._catchup_until = (
-                            asyncio.get_running_loop().time()
-                            + self.CATCHUP_STICKY_SECONDS
-                        )
+                        remaining = deadline - loop.time()
+                        if remaining <= 0:
+                            await self._close("probe exceeded stall budget")
+                            return
+                        self._catchup_until = loop.time() + self._catchup_lease
                         self._wake.set()
+                        if loop.time() >= replay_at:
+                            self._enter_replay()
                         try:
-                            latency = await asyncio.wait_for(
-                                asyncio.shield(pong), timeout=self.MAX_HOLD_SECONDS
+                            latency = await self._wait_task(
+                                self._pending_probe,
+                                min(self.PROBE_INTERVAL_SECONDS, remaining),
                             )
-                            # Let downstream backlog drain before resuming revisions.
-                            if isinstance(latency, (int, float)):
-                                self._catchup_until = (
-                                    asyncio.get_running_loop().time()
-                                    + max(self.CATCHUP_STICKY_SECONDS, latency)
-                                )
                             break
                         except asyncio.TimeoutError:
-                            continue
+                            pass
+                self._pending_probe = None
+                if was_late:
+                    self._last_lag_delay = loop.time() - started
+                if isinstance(latency, (int, float)):
+                    # Learn from late successes too, but cap one sample so a
+                    # congestion spike cannot become an enormous RTT baseline.
+                    sample = min(latency, self._behind_threshold())
+                    self._rtt += self.RTT_SMOOTHING * (sample - self._rtt)
                 self._probe_tick.set()
                 self._wake.set()
                 await asyncio.sleep(self.PROBE_INTERVAL_SECONDS)
@@ -289,6 +388,34 @@ class Client:
         except asyncio.CancelledError:
             raise
         finally:
+            if self._pending_probe is not None:
+                await self._stop_task(self._pending_probe)
+                self._pending_probe = None
             # Never leave the sender blocked on a connection that is going away.
             self._catchup_until = 0.0
             self._probe_tick.set()
+
+    def _start_lag(self, now: float) -> None:
+        """Back off if a full-update trial quickly fills the receiver again.
+
+        Prompt pongs during final-only replay don't prove capacity for every
+        revision. Repeated failed normal trials earn a longer, bounded replay
+        lease; a sustained healthy normal trial resets it. An isolated long
+        stall doesn't by itself increase the lease.
+        """
+        if self._normal_trial_started is not None and self._last_lag_delay > 0:
+            probation = min(
+                self.MAX_CATCHUP_SECONDS,
+                max(4 * self.CATCHUP_STICKY_SECONDS, 2 * self._last_lag_delay),
+            )
+            if now - self._normal_trial_started < probation:
+                self._catchup_lease = min(
+                    self.MAX_CATCHUP_SECONDS, 2 * self._catchup_lease
+                )
+            else:
+                self._catchup_lease = self.CATCHUP_STICKY_SECONDS
+        self._normal_trial_started = None
+
+    async def _round_trip(self) -> float:
+        pong = await self.ws.ping()
+        return await pong
