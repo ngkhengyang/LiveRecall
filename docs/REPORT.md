@@ -26,8 +26,10 @@ pending updates or latest active state during replay without sending them.
 `client/index.html` provides the caption and recall interface.
 
 The first message selects the connection role: `SOURCE_HELLO` identifies a
-producer and `CLIENT_HELLO` identifies a student. A missing or invalid hello is
-refused after at most five seconds, using close code 1008. The required workload
+producer and `CLIENT_HELLO` identifies a student. The server waits up to five
+seconds for that message; missing, unrecognized, or malformed source hellos
+are refused using close code 1008. Client hello fields are defaulted or clamped
+when invalid, including a maximum `history_seconds` of 60. The required workload
 uses one session and one active source; a second simultaneous source is refused.
 Caption updates must match the session declared in `SOURCE_HELLO`.
 
@@ -60,9 +62,11 @@ Each accepted final receives a contiguous internal sequence number and enters
 an insertion-ordered shared log, retained for 90 seconds using a monotonic clock.
 The final-tail and evicted-final watermarks remain meaningful when the log is
 empty. Expiry removes the corresponding segment state; a separate retirement
-watermark rejects obsolete source IDs. The server caps unfinished segments at
-4,000. Final-state memory depends on caption rate and size within retention,
-not total lecture duration. Reconnect context remains limited to the requested
+watermark rejects obsolete source IDs. The server retires the lowest unfinished
+segment IDs when their count exceeds 4,000. Final-state memory depends on
+caption rate and size within retention, not total lecture duration at a bounded
+input rate. The shared final log has no fixed count or byte cap; a time window
+alone is not a workload-independent memory bound. Reconnect context remains limited to the requested
 0--60 seconds; connected replay can deliver older outstanding finals while
 they remain in the shared log. It raises `ReplayExpired` rather than silently
 skipping a prefix that has expired.
@@ -98,7 +102,8 @@ leave the local buffer, and the sender reads finals after its committed cursor.
 Subsequent finals only wake the sender and remove any corresponding active
 entry. Locally retained active state is coalesced without resetting its original
 enqueue age. The soft threshold is 256 updates; final/byte admission overflow
-also attempts replay instead of routinely disconnecting. Latest active state
+also attempts replay instead of routinely disconnecting. The buffer additionally
+caps locally pending finals at 4,096 before switching to shared-log replay. Latest active state
 must still fit within 4,000 entries and 4 MiB of pending JSON. One in-flight
 message and transport buffers lie outside these limits.
 
@@ -132,15 +137,15 @@ below the 90-second log horizon. A closing handshake is bounded to two seconds,
 then the transport is aborted. Expired outstanding finals, exhausted active
 capacity, or terminal stalls are explicit failure conditions, not lossless
 recovery claims. Genuine reconnect still retrieves only requested recent
-context. These finite bounds and the new replay policy require the experiments
-in Section 4; earlier reconnect-policy measurements do not establish current
-performance.
+context. Section 4 must validate this policy on the submitted implementation;
+measurements from an earlier reconnect-based overload policy do not establish
+its performance.
 
 ## 4. Public experiments and results
 
 ### 4.1 Reproducible setup
 
-TODO: Record Ubuntu version, CPU/RAM, Python and dependency versions, implementation commit, server configuration, caption-source parameters, freshness threshold and exact commands/output paths. Run the server and simulated clients in the same Ubuntu environment for the required networking experiments.
+TODO: Record Ubuntu version, CPU/RAM, Python and dependency versions, implementation commit, server configuration, caption-source parameters, freshness threshold and exact commands/output paths. Run the server and simulated clients in the same Ubuntu environment for the required networking experiments. For T5, record the actual interface and qdisc configuration; the supplied `delay_loss.sh` uses 120 ms delay, 30 ms jitter (normal distribution), and 3% packet loss.
 
 Use the supplied harness without changing its measurement logic. Run each required test at least three independent times and report the median. Follow [PUBLIC_TESTS.md](PUBLIC_TESTS.md) for commands; record the exact `tc/netem` settings for T5 and reset the impairment afterwards.
 
@@ -154,13 +159,23 @@ Use the supplied harness without changing its measurement logic. Run each requir
 
 ### 4.2 Measured results
 
-Caption Age is client receive time minus `source_ts`, excluding browser rendering;
-report its P50/P95/P99. Final completeness is correctly received unique finals /
-generated unique finals. Fresh Caption Ratio is the fraction of received updates
-within threshold T (public default: 500 ms); Fresh Final Caption Ratio uses generated
-finals as its denominator. Normal Update Coverage measures source revisions
-received during unconstrained operation. Recovery time runs from successful
-reconnect until all required recent recovery state has arrived.
+Caption Age is client receive time minus `source_ts`, excluding browser rendering.
+The supplied analyser computes P50/P95/P99 and Fresh Caption Ratio from accepted
+live `CAPTION_UPDATE` events, excluding `HISTORY_ITEM` events. Fresh Caption Ratio
+uses threshold T (public default: 500 ms). Final completeness counts unique
+`(client, segment)` finals received live or through history, divided by generated
+finals times client count. Fresh Final Caption Ratio uses the same denominator
+and counts each pair's earliest correct delivery within T. Report Normal Update
+Coverage on unconstrained T1/T2: unique live `(segment, revision)` deliveries per
+client divided by generated updates times client count. Coverage during overload
+or disconnection is useful context, but is not unconstrained coverage.
+
+Recovery time means successful reconnect to receipt of all required recent state.
+The harness reports time to the `HISTORY` response, which alone cannot establish
+complete recovery. Validate its items against the expected missed finals and
+report completeness and duplicate/stale counts alongside it. Compute each metric
+per run, then take its median across at least three independent runs; do not pool
+all events before computing percentiles.
 
 | Test / client group | P50 age (ms) | P95 age (ms) | P99 age (ms) | Final completeness (%) |
 |---|---:|---:|---:|---:|
@@ -180,6 +195,19 @@ reconnect until all required recent recovery state has arrived.
 | T4 | TODO | TODO | TODO |
 | T5 | TODO | TODO | TODO |
 
+| Recovery / robustness evidence | Median across runs / evidence path |
+|---|---|
+| T4 HISTORY response P50 / P95 (ms); complete missed-final recovery verified | TODO |
+| T1-T5 duplicate / stale / invalid-history counts; connection errors | TODO |
+| T3 peak server RSS (MiB), observation duration, and memory trend | TODO |
+| T3 normal-client P95 / freshness compared with T2 | TODO |
+
+The standard JSON summaries provide overall metrics and normal/slow P50, P95,
+and freshness, but not every group-specific cell above. Derive missing group
+metrics from the existing CSV logs using the same definitions and denominators;
+retain that calculation with the evidence without modifying harness measurement
+logic. Do not fill group cells with overall values. RSS observations support
+boundedness for the measured workload; they do not prove a fixed global bound.
 
 TODO: Interpret the results: correctness under T1, scaling under T2, normal-versus-slow isolation under T3, recovery under T4, and TCP retransmission/head-of-line effects on tail latency under T5. Explain unexpected observations and any failed runs.
 
@@ -199,9 +227,28 @@ TODO: Explain the mechanism behind the measured difference and its cost. Quantif
 
 TODO: Discuss failures and engineering trade-offs, including any tuning that did not help. Relate claims to the measurements and distinguish observed behavior from untested expectations.
 
-TODO: State known limits: recovery horizon, sustained overload, tested population/workloads, environment differences, and any incomplete application behavior. Do not claim hidden-workload performance from public tests alone.
+Current limits are explicit. Recovery is recent-context-only and there are no
+application ACKs: successful WebSocket sends do not prove client application
+receipt. The shared final log has a 90-second age limit but no fixed byte/count
+cap; per-client history snapshots also scale with that retained traffic. Active
+state has count limits, and per-client pending JSON has a 4 MiB cap, excluding
+in-flight messages and transport buffers. Retiring unfinished source segments
+beyond 4,000 sacrifices their state. Thus the current implementation does not
+establish a fixed overall memory ceiling independent of source rate and size.
+It supports one lecture at a time and needs a server restart and browser reload
+for a new lecture. Browser recall uses source/client wall clocks, whereas server
+recovery windows use monotonic acceptance time; delayed ingestion or clock skew
+can make their windows differ. Ping/pong is an indirect lag signal, and longer
+catch-up leases trade provisional coverage for stability after repeated lag.
 
-TODO: Give a short, concrete future-work/FYP direction and explain how it builds on the results.
+TODO: Relate these limits to the tested workloads, measured failures, and Ubuntu
+environment. Do not claim unmeasured scale, boundedness, or recovery performance.
+
+A future FYP direction is application-acknowledged adaptive delivery: measure
+which final sequence the browser has actually applied, then use that feedback
+to tune provisional suppression and catch-up pacing. This would address the
+uncertainty of ping-based lag detection. Evaluate it against the present policy
+using final freshness, normal revision coverage, recovery time, and memory cost.
 
 ## References
 
@@ -235,14 +282,16 @@ targets, not assignment rules; they include space for headings and tables.
 Replace TODO instructions with final prose and measurements within these budgets.
 Keep architecture concise; a method-by-method walkthrough belongs in an appendix.
 Leave the remaining 0.25 page for the title, team line, and layout variation.
-An A4/11 pt/20 mm-margin layout projection expanded to these prose targets, with
-the existing tables, rendered to five main pages. This is a planning check;
-verify again after replacing placeholders and adding any figures. Replace a
-table with a figure where useful instead of continually adding material.
+The current draft has not been verified at these page allowances. Condense
+Sections 1-3 before filling in results; move implementation-level probe details
+to an appendix if needed. Verify the final export after replacing placeholders
+and adding any figures. Replace a table with a figure where useful instead of
+continually adding material.
 
 - [ ] All required sections are supported by the submitted implementation and evidence; no TODOs remain.
 - [ ] Sections 2-3 explain actual rules, numeric bounds, and failure/recovery limits.
 - [ ] Results cover all required metrics, recovery time, isolation, and bounded resource usage.
+- [ ] Fixed-bound limitations are disclosed; time-based retention is not presented as a fixed byte/count cap.
 - [ ] The separate deterministic browser demo covers revision replacement, local recall, reconnect, and late join.
 - [ ] T1–T5 each have at least three independent runs; medians and units are clear.
 - [ ] At least one stress-test before/after comparison is quantified and reproducible.
