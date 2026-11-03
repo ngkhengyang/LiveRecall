@@ -17,6 +17,13 @@ install:
 	./venv/bin/pre-commit install --config config/.pre-commit-config.yaml
 	./venv/bin/python test/submission_check.py
 
+
+install-VM:
+	python3 -m venv venvVM
+	./venvVM/bin/python -m pip install -r submission_root/requirements.txt
+	./venvVM/bin/python -m pip install -r config/requirements-dev.txt
+
+
 # Basic public experiment (20 clients, 20 seconds, one run).
 demo-basic:
 	./venv/bin/python test/run_demo.py --clients 20 --duration 20 --runs 1
@@ -100,3 +107,6 @@ exp-probe-VM:
 # One T1 run per arm for a quick harness check.
 exp-probe-quick:
 	$(VENV)/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick --venv $(VENV)
+
+exp-probe-quick-VM:
+	$(VENV_VM)/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick --venv $(VENV_VM)
