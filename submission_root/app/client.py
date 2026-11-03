@@ -108,11 +108,11 @@ class Client:
         )
 
         try:
-            # HISTORY is always the first frame this client sees: the sender
-            # task that could emit live updates does not exist until after it
-            # has been sent.
-            if not await self._send(History(items)):
-                return
+            # Complete the bounded HISTORY snapshot before starting the live
+            # sender. New arrivals remain pending behind the captured boundary.
+            for history in History.batches(items):
+                if not await self._send(history):
+                    return
             # Use the captured tail, even for empty/zero-second history. Finals
             # arriving during the send are strictly after this boundary.
             self._last_sent_final_sequence = snapshot_tail
