@@ -38,12 +38,12 @@ Custom runs and summary reprinting:
 ./venv/bin/python -u experiments/probe_ab.py --out output/probe_ab_custom --summary-only
 ```
 
-The tests run with `./venv` by default. Use `--venv` to choose another virtual
-environment folder, or a Python executable directly:
+The tests run with the repository's `venv` by default. Pass `--venv` with the
+full path of any virtual environment to use that one instead:
 
 ```sh
-./venv/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --venv ~/envs/liverecall
-./venv/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --venv /usr/bin/python3
+./venv/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --venv /home/me/envs/liverecall
+make exp-probe-quick VENV=/mnt/c/Users/games/Desktop/LiveRecall/venvVM
 ```
 
 Summary-only uses the recorded test selection and run count by default. An explicit

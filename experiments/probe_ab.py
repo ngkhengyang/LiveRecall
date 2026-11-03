@@ -72,17 +72,17 @@ SKIPPED = "T5: SKIPPED (no passwordless sudo / sch_netem)"
 
 
 def resolve_python(venv):
-    """Return the interpreter for a venv folder, or the given interpreter path."""
-    venv = venv if venv.is_absolute() else Path.cwd() / venv
-    if venv.is_dir():
-        for candidate in ("bin/python", "Scripts/python.exe"):
-            python = venv / candidate
-            if python.is_file():
-                return python
-        raise ValueError(f"No Python interpreter found in virtual environment: {venv}")
-    if venv.is_file():
-        return venv
-    raise ValueError(f"--venv path does not exist: {venv}")
+    """Return the interpreter inside the venv at the given full path."""
+    venv = venv.expanduser()
+    if not venv.is_absolute():
+        raise ValueError(f"--venv must be a full path to a virtual environment: {venv}")
+    if not venv.is_dir():
+        raise ValueError(f"--venv folder does not exist: {venv}")
+    for candidate in ("bin/python", "Scripts/python.exe"):
+        python = venv / candidate
+        if python.is_file():
+            return python
+    raise ValueError(f"No Python interpreter found in virtual environment: {venv}")
 
 
 def validate_out(path):
@@ -406,8 +406,8 @@ def main():
         "--venv",
         type=Path,
         default=DEFAULT_VENV,
-        help="virtual environment folder (or Python executable) used to run "
-        "the tests; default: ./venv",
+        help="full path of the virtual environment used to run the tests, "
+        f"e.g. /home/me/envs/liverecall; default: {DEFAULT_VENV}",
     )
     args = parser.parse_args()
     tests = args.tests.split(",")

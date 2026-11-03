@@ -19,9 +19,8 @@ install:
 
 
 install-VM:
-	python3 -m venv venvVM
-	./venvVM/bin/python -m pip install -r submission_root/requirements.txt
-	./venvVM/bin/python -m pip install -r config/requirements-dev.txt
+	pip install -r submission_root/requirements.txt
+	pip install -r config/requirements-dev.txt
 
 
 # Basic public experiment (20 clients, 20 seconds, one run).
@@ -92,21 +91,16 @@ demo-caption:
 
 .PHONY: exp-probe exp-probe-quick
 
-# Full probe comparison, with progressive and final terminal summaries (~25 min).
-# Override the environment with: make exp-probe VENV=path/to/venv
-VENV ?= venv
-VENV_VM ?= venvVM
+# Full path of the virtual environment used by the probe experiment.
+# Pass any venv on the command line, e.g.
+#   make exp-probe VENV=/mnt/c/Users/games/Desktop/LiveRecall/venvVM
+#   make exp-probe-quick VENV=/home/me/envs/liverecall
+VENV ?= $(CURDIR)/venv
 
+# Full probe comparison, with progressive and final terminal summaries (~25 min).
 exp-probe:
 	$(VENV)/bin/python -u experiments/probe_ab.py --venv $(VENV)
-
-exp-probe-VM:
-	$(VENV_VM)/bin/python -u experiments/probe_ab.py --venv $(VENV_VM)
-
 
 # One T1 run per arm for a quick harness check.
 exp-probe-quick:
 	$(VENV)/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick --venv $(VENV)
-
-exp-probe-quick-VM:
-	$(VENV_VM)/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick --venv $(VENV_VM)
