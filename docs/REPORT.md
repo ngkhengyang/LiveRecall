@@ -4,51 +4,55 @@ Team: TODO | Members: TODO | Implementation commit: TODO
 
 ## 1. Architecture and protocol
 
-LiveRecall distributes a revision-based caption stream from the supplied
-`test/caption_source.py` to student browsers over WebSockets. The design separates
-protocol parsing, authoritative caption state, and independent per-client delivery.
+LiveRecall streams captions from the supplied deterministic source to student
+browsers over WebSockets. Figure 1 shows four logical components within one
+Python asyncio server process.
 
-```text
-caption_source.py -> Source -> Server -> CaptionStore / shared final log
-                                | enqueue             | replay finals
-                                v                     v
-                     per-client FIFO / active state -> sender -> browser
+```mermaid
+flowchart LR
+    Producer["Caption source"]
+    Browser["Student browser<br/>Live captions, local recall and reconnect"]
+
+    subgraph Backend["LiveRecall server - one Python asyncio process"]
+        Coordinator["Connection and broadcast coordinator<br/>Server"]
+        Source["Source ingestion<br/>Source"]
+        Store["Caption state and recovery history<br/>CaptionStore"]
+        Client["Per-client delivery<br/>Client, including buffer, sender and lag probe"]
+
+        Source -->|parsed updates| Coordinator
+        Coordinator -->|validate and apply| Store
+        Coordinator -->|enqueue accepted updates| Client
+        Store -->|history and final replay via Server| Client
+    end
+
+    Producer -->|WebSocket: SOURCE_HELLO, CAPTION_UPDATE| Source
+    Browser -->|WebSocket: CLIENT_HELLO| Coordinator
+    Coordinator -->|establish client delivery| Client
+    Client -->|WebSocket: HISTORY, CAPTION_UPDATE| Browser
 ```
 
-`submission_root/solution_server.py` calls `Server.main()` and preserves the
-required `python solution_server.py --port <port>` interface. The asyncio server
-defaults to `0.0.0.0:8765`. `app/server.py` owns one `CaptionStore`, the client
-registry, and the one-active-source flag. `app/source.py` handles producer input;
-`app/client.py` manages each student's history response, sender, lag probes,
-shared-log delivery cursor, and cleanup. `app/outbound_buffer.py` stores normal
-pending updates or latest active state during replay without sending them.
-`client/app.js` manages browser revision state, local recall, and reconnects;
-`client/index.html` provides the caption and recall interface.
+*Figure 1. Server components and caption flow. Each receiver has its own delivery
+component; history and final replay are accessed through the coordinator.*
 
-The first message selects the connection role: `SOURCE_HELLO` identifies a
-producer and `CLIENT_HELLO` identifies a student. The server waits up to five
-seconds for that message; missing, unrecognized, or malformed source hellos
-are refused using close code 1008. Client hello fields are defaulted or clamped
-when invalid, including a maximum `history_seconds` of 60. The required workload
-uses one session and one active source; a second simultaneous source is refused.
-Caption updates must match the session declared in `SOURCE_HELLO`.
+`Source` validates producer messages and forwards session-matching updates to
+`Server`, which coordinates connections and broadcasts accepted state.
+`CaptionStore` enforces revision rules and retains recent finals for recovery.
+Each `Client` owns an outbound buffer, sender and lag probe, separating delivery
+from ingestion. Fan-out only enqueues in memory, so a blocked socket send does
+not directly block other clients; fan-out work still grows with client count.
+The browser replaces caption revisions, stores local recall history and
+reconnects automatically.
 
-`app/protocol.py` validates caption fields: positive integer segment/revision IDs,
-a finite nonnegative Unix-epoch `source_ts`, a Boolean `final`, string `text`, and
-a nonempty session. It ignores extra fields; the source handler skips malformed
-updates and unknown message types. The server accepts arbitrary increasing
-revision numbers. The supplied producer completes each segment before starting
-the next. `SOURCE_DONE` marks the end of a test stream; the server does not relay
-it to clients.
+The opening `SOURCE_HELLO` or `CLIENT_HELLO` selects the connection role. The
+server supports one active source and session. A client hello reports its latest
+finalized `(last_segment, last_revision)` and requests up to 60 seconds of recent
+context. The server sends `HISTORY` before live `CAPTION_UPDATE` messages.
 
-Accepted updates pass through `CaptionStore` before broadcast. Ingestion and
-per-client enqueueing contain no socket sends or `await`; each client has its own
-sender task, so a blocked send does not directly block other senders. Fan-out
-still costs work proportional to client count. Immutable caption objects cache
-their serialized JSON for reuse. `CLIENT_HELLO` reports a finalized cursor and
-requests up to 60 seconds of context; `HISTORY` precedes live updates. A source
-disconnect retains server state. Starting a new lecture requires a server restart
-and browser reload because segment IDs share one store.
+Typed protocol messages validate caption fields and serialize JSON, caching
+caption serialization for reuse across clients. Malformed caption updates are
+skipped, unknown fields are ignored, and invalid optional client-hello fields
+are defaulted or clamped. Revision/recovery rules and overload handling are
+detailed in Sections 2 and 3.
 
 ## 2. Revision and recovery semantics
 
@@ -256,6 +260,18 @@ using final freshness, normal revision coverage, recovery time, and memory cost.
 - TODO: Cite external technical sources actually used.
 
 ## Appendices
+
+### Appendix A. Client-server message exchange
+
+![Client-server message exchange](../diagrams/client_server_protocol.png)
+
+*Figure A1. Example initial connection, revision replacement and incremental
+recovery. Time flows downward; after reconnect, the browser reports its latest
+finalized cursor and receives recent missed finals before live updates resume.*
+
+Each caption update, including each `HISTORY` item, also carries `session` and
+`source_ts`, omitted from the diagram for clarity. WebSocket setup and control
+frames are omitted. Normal recall uses local browser state without a request.
 
 TODO: Put exact commands, per-run outputs, detailed configurations, and any code
 walkthrough here or link to repository evidence. Keep the required design,
