@@ -50,6 +50,12 @@ python solution_server.py --port 8765
 
 Return to the repository root before following the remaining sections.
 
+Reconnect and late-join context arrives as ordered `HISTORY` messages, targeting
+at most 64 captions and 256 KiB of complete JSON per message. All snapshot
+messages precede live updates. Empty context still receives one empty `HISTORY`.
+A caption larger than the byte target travels alone without truncation and must
+still fit the receiving client's message-size limit.
+
 ## Mandatory deterministic application demo
 
 With the server and two browser clients running, start the supplied source in
