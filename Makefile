@@ -82,3 +82,13 @@ demo-browser:
 # Stream deterministic captions for the long browser demonstration.
 demo-caption:
 	./venv/bin/python test/caption_source.py --duration 120
+
+.PHONY: exp-probe exp-probe-quick
+
+# Full probe comparison, with progressive and final terminal summaries (~25 min).
+exp-probe:
+	./venv/bin/python -u experiments/probe_ab.py
+
+# One T1 run per arm for a quick harness check.
+exp-probe-quick:
+	./venv/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick
