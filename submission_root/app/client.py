@@ -151,6 +151,7 @@ class Client:
         self._frames_sent = asyncio.Event()
         self._catchup_until = 0.0
         self._rtt = 0.0
+        self._min_rtt = 0.0
         self._sent_frames = 0
         self._pong_overdue = False
         self._last_overdue_at = -math.inf
@@ -248,6 +249,13 @@ class Client:
             return None
         if before is None or after is None:
             return None
+        # Congestion drops count as queueing when RTT shows queue pressure.
+        if self._min_srtt > 0 and (
+            max(self._kernel_rtt(before), self._kernel_rtt(after)) >= elapsed * 0.5
+            or max(before["rtt"], after["rtt"]) / 1_000_000.0
+            > max(2 * self._min_srtt, self._min_srtt + 0.05)
+        ):
+            return "queue"
         # Only retransmissions during this ping can explain its delay.
         retransmission = after["total_retrans"] > before["total_retrans"]
         # Incidental loss cannot explain a reader's multi-second stall.
@@ -260,13 +268,11 @@ class Client:
         )
         if retransmission and elapsed <= loss_budget:
             return "loss"
-        if max(self._kernel_rtt(before), self._kernel_rtt(after)) >= elapsed * 0.5:
-            return "queue"
         return None
 
     def _behind_threshold(self) -> float:
-        info = self._tcp_cached
-        baseline = max(self._rtt, info["rtt"] / 1_000_000.0 if info else 0.0)
+        # Minimum RTT keeps queueing delay from raising the overdue threshold.
+        baseline = max(self._min_srtt, self._min_rtt) or self._rtt
         return max(self.BEHIND_AFTER_SECONDS, self.BEHIND_RTT_MULTIPLIER * baseline)
 
     def _resync_threshold(self) -> float:
@@ -512,15 +518,7 @@ class Client:
         info = self._tcp_cached
         if now - self._tcp_checked_at >= 0.02:
             info = self._sample_tcp_info()
-        while info and (
-            info["ca_state"] in (3, 4)
-            or info["retransmits"] > 0
-            or info.get("lost", 0) > 0
-            or (
-                info["unacked"] > 0
-                and info.get("last_ack_recv", 0) > self._kernel_rtt(info) * 1000 + 40
-            )
-        ):
+        while info and (info["ca_state"] in (3, 4) or info["retransmits"] > 0):
             if not self._loss_hold_deadline:
                 self._loss_hold_deadline = (
                     now + (info["rto"] + info["rtt"]) / 1_000_000.0
@@ -820,6 +818,7 @@ class Client:
                     )
                     # Answered promptly: fold it into this link's baseline.
                     if isinstance(latency, (int, float)):
+                        self._min_rtt = min(self._min_rtt or latency, latency)
                         self._rtt += self.RTT_SMOOTHING * (latency - self._rtt)
                 except asyncio.TimeoutError:
                     # Overdue: stop pushing, then keep waiting on this pong
