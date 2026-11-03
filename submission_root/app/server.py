@@ -90,9 +90,6 @@ class Server:
                 self._source_connected = False
         elif kind == "CLIENT_HELLO":
             client_hello = ClientHello.from_dict(payload)
-            if client_hello is None:
-                await ws.close(self.BAD_HELLO, "Malformed CLIENT_HELLO")
-                return
             await Client(ws, client_hello, self).run()
         else:
             await ws.close(self.BAD_HELLO, "Expected SOURCE_HELLO or CLIENT_HELLO")
@@ -111,11 +108,6 @@ class Server:
 
     # -- caption flow ---------------------------------------------------
 
-    def compute_history(
-        self, last_segment: int, last_revision: int, history_seconds: float = 60.0
-    ) -> list[CaptionUpdate]:
-        return self._store.compute_history(last_segment, last_revision, history_seconds)
-
     def history_snapshot(
         self, last_segment: int, last_revision: int, history_seconds: float = 60.0
     ) -> tuple[list[CaptionUpdate], int]:
@@ -124,17 +116,11 @@ class Server:
             last_segment, last_revision, history_seconds
         )
 
-    @property
-    def final_tail(self) -> int:
-        return self._store.final_tail
-
     def final_sequence(self, update: CaptionUpdate) -> int:
         return self._store.final_sequence(update)
 
-    def read_final_batch(
-        self, after_sequence: int, max_items: int, max_bytes: int
-    ) -> tuple[list[CaptionUpdate], int]:
-        return self._store.read_final_batch(after_sequence, max_items, max_bytes)
+    def read_next_final(self, after_sequence: int) -> tuple[CaptionUpdate, int] | None:
+        return self._store.read_next_final(after_sequence)
 
     def ingest_caption_update(self, update: CaptionUpdate) -> None:
         """Called by ``Source``. Broadcasts only genuinely new state."""
@@ -145,11 +131,8 @@ class Server:
     def broadcast(self, update: CaptionUpdate) -> None:
         """Hand one update to every client without touching the network.
 
-        This is why slow-client isolation holds: ``enqueue`` only writes to an
-        in-memory buffer, so no client's receive rate can delay delivery to any
-        other client, and the source's read loop never blocks here. It is also
-        why this loop is safe without a snapshot copy -- there is no await
-        inside it, so no client can unregister midway through.
+        Each sender owns its socket waits. This loop only changes in-memory
+        state and has no await, so clients cannot unregister during iteration.
         """
         for client in self._clients:
             client.enqueue(update)
