@@ -1,57 +1,52 @@
-"""Bounded pending delivery state for one client.
+"""One receiver's bounded FIFO queue and coalesced latest caption state.
 
-Normal delivery preserves every revision in FIFO order. Only detected client
-lag or queue pressure enables coalescing to one useful entry per segment.
-Capacity pressure must never evict a segment's latest state just because it is
-provisional. Dequeuing transfers ownership to the sender; it does not
-acknowledge application-level receipt.
+The owner decides when to replay finals from shared history. This buffer only
+handles admission, ordering, replacement, and removal of pending captions.
+Dequeuing transfers ownership to the sender; it is not a delivery acknowledgement.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from .protocol import CaptionUpdate
 
 
-class OutboundBuffer:
-    """Independent limits for pending finals, active segments, and wire bytes.
+class Usage(NamedTuple):
+    """Projected queue usage after admitting an update."""
 
-    A 256-update backlog or byte pressure activates coalescing and replay
-    until the queue drains. Client lag can also enable coalescing explicitly.
-    Exceeding a hard limit after compaction refuses new buffered work. The
-    owning Client can switch finals to shared-log replay instead of closing.
-    Latest active state still has to fit within the per-client limits.
+    active: int
+    pending: int
+    bytes: int
+
+
+class OutboundBuffer:
+    """Preserve FIFO revisions normally and latest segment state under pressure.
+
+    The soft entry limit asks the owner to switch finals to shared-log replay.
+    Active entries and serialized bytes remain bounded after compaction.
     """
 
-    MAX_PENDING_UPDATES = 256  # Soft threshold for semantic catch-up delivery.
-    MAX_PENDING_FINALS = 4096
+    MAX_PENDING_UPDATES = 256
     MAX_PENDING_ACTIVE_SEGMENTS = 4000
     MAX_PENDING_BYTES = 4 * 1024 * 1024
-    MAX_BATCH_ITEMS = 64
-    MAX_BATCH_BYTES = 256 * 1024
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
-        # Monotonic queue keys preserve global arrival order, including when
-        # several revisions of the same segment are pending simultaneously.
+        # Distinct keys retain every revision in normal FIFO mode.
         self._pending: dict[int, CaptionUpdate] = {}
         self._queued_at: dict[int, float] = {}
         self._next_key = 0
-        # This index is used only while coalescing, with one entry per segment.
+        # Coalescing uses one queue entry per segment.
         self._by_segment: dict[int, int] = {}
-        self._overloaded = False
+        self._coalescing_requested = False
         self._pressure_active = False
         self._active_count = 0
         self._pending_bytes = 0
         self._should_close = False
         self._coalesced = 0
         self._rejected = 0
-
-    @property
-    def should_close(self) -> bool:
-        return self._should_close
 
     @property
     def pending(self) -> int:
@@ -63,21 +58,13 @@ class OutboundBuffer:
 
     @property
     def pressured(self) -> bool:
-        # Keep catch-up active through compaction until this backlog drains.
+        """Whether the soft limit was reached and the backlog has not drained."""
         return self._pressure_active
 
     @property
-    def _coalescing(self) -> bool:
-        return self._overloaded or self._pressure_active
-
-    def set_overloaded(self, overloaded: bool) -> None:
-        """Apply the client's lag verdict without discarding normal revisions."""
-        was_coalescing = self._coalescing
-        self._overloaded = overloaded
-        if self._coalescing and not was_coalescing:
-            self._compact()
-        elif not self._coalescing:
-            self._by_segment.clear()
+    def should_close(self) -> bool:
+        """Whether a hard limit refused an update."""
+        return self._should_close
 
     @property
     def coalesced(self) -> int:
@@ -85,50 +72,101 @@ class OutboundBuffer:
 
     @property
     def rejected(self) -> int:
-        """Updates refused after a hard limit, reported when closing."""
         return self._rejected
 
-    def has_pending(self) -> bool:
-        return bool(self._pending)
+    @property
+    def _coalescing(self) -> bool:
+        return self._coalescing_requested or self._pressure_active
 
     def offer(self, update: CaptionUpdate) -> None:
+        """Admit one update, compacting before any hard-limit refusal."""
         if self._should_close:
             self._rejected += 1
             return
 
-        update_bytes = len(update.to_json())
         key = self._by_segment.get(update.segment) if self._coalescing else None
-        existing = self._pending[key] if key is not None else None
-        replaced_bytes = len(existing.to_json()) if existing is not None else 0
-        projected_bytes = self._pending_bytes + update_bytes - replaced_bytes
+        usage = self._usage_after(update, key)
         if not self._pressure_active and (
-            self.pending + int(existing is None) >= self.MAX_PENDING_UPDATES
-            or projected_bytes > self.MAX_PENDING_BYTES
+            usage.pending >= self.MAX_PENDING_UPDATES
+            or usage.bytes > self.MAX_PENDING_BYTES
         ):
+            was_coalescing = self._coalescing
             self._pressure_active = True
-            self._compact()
-            key = self._by_segment.get(update.segment)
-            existing = self._pending[key] if key is not None else None
+            if not was_coalescing:
+                self._compact()
+                key = self._by_segment.get(update.segment)
+                usage = self._usage_after(update, key)
 
-        active_count = self._active_count - int(
-            existing is not None and not existing.final
-        )
-        active_count += int(not update.final)
-        pending_count = self.pending + int(existing is None)
-        # to_json uses ensure_ascii=True, so string length equals UTF-8 size.
-        pending_bytes = self._pending_bytes + update_bytes
-        if existing is not None:
-            pending_bytes -= len(existing.to_json())
-        if (
-            active_count > self.MAX_PENDING_ACTIVE_SEGMENTS
-            or pending_count - active_count > self.MAX_PENDING_FINALS
-            or pending_bytes > self.MAX_PENDING_BYTES
-        ):
+        if not self._within_hard_limits(usage):
             self._should_close = True
             self._rejected += 1
             return
+        self._store(update, key, usage)
 
+    def next_update(self) -> CaptionUpdate | None:
+        """Remove the oldest pending update."""
+        if not self._pending:
+            return None
+        return self._take(next(iter(self._pending)))
+
+    def has_pending(self) -> bool:
+        return bool(self._pending)
+
+    def set_coalescing(self, on: bool) -> None:
+        """Apply the owner's policy while preserving independent pressure state."""
+        was_coalescing = self._coalescing
+        self._coalescing_requested = on
+        if self._coalescing and not was_coalescing:
+            self._compact()
+        elif not self._coalescing:
+            self._by_segment.clear()
+
+    def drop_finals_keep_latest_active(self) -> None:
+        """Transfer queued finals to shared replay and retain latest drafts."""
+        self.set_coalescing(True)
+        for key, update in list(self._pending.items()):
+            if update.final:
+                self._take(key)
+        self._pressure_active = False
+        self._should_close = False
+
+    def discard_segment(self, segment: int) -> None:
+        """Remove a coalesced draft once its final is available in shared history."""
+        key = self._by_segment.get(segment)
+        if key is not None:
+            self._take(key)
+
+    def take_active_update(
+        self, provisional_grace: float = 0.0
+    ) -> CaptionUpdate | None:
+        """Remove the oldest draft once its original enqueue time passes grace."""
+        for key, update in self._pending.items():
+            if not update.final:
+                if self._clock() - self._queued_at[key] < provisional_grace:
+                    return None
+                return self._take(key)
+        return None
+
+    def _usage_after(self, update: CaptionUpdate, key: int | None) -> Usage:
+        existing = self._pending[key] if key is not None else None
+        active = self._active_count + int(not update.final)
+        pending = self.pending + 1
+        # Canonical caption JSON is ASCII, so character and UTF-8 byte counts agree.
+        size = self._pending_bytes + len(update.to_json())
         if existing is not None:
+            active -= int(not existing.final)
+            pending -= 1
+            size -= len(existing.to_json())
+        return Usage(active, pending, size)
+
+    def _within_hard_limits(self, usage: Usage) -> bool:
+        return (
+            usage.active <= self.MAX_PENDING_ACTIVE_SEGMENTS
+            and usage.bytes <= self.MAX_PENDING_BYTES
+        )
+
+    def _store(self, update: CaptionUpdate, key: int | None, usage: Usage) -> None:
+        if key is not None:
             self._coalesced += 1
         else:
             key = self._next_key
@@ -137,73 +175,8 @@ class OutboundBuffer:
         self._pending[key] = update
         if self._coalescing:
             self._by_segment[update.segment] = key
-        self._active_count = active_count
-        self._pending_bytes = pending_bytes
-
-    def begin_replay(self) -> None:
-        """Keep latest active state; the shared log now owns pending finals.
-
-        The sender may still own an in-flight message. It must commit that
-        message's delivery cursor before fetching the next shared-log batch.
-        """
-        self._overloaded = True
-        self._compact()
-        for key, update in list(self._pending.items()):
-            if update.final:
-                self._take(key)
-        self._pressure_active = False
-        self._should_close = False
-
-    def discard_segment(self, segment: int) -> None:
-        """Remove an active entry once its final is available in the log."""
-        key = self._by_segment.get(segment)
-        if key is not None:
-            self._take(key)
-
-    def _compact(self) -> None:
-        """Keep each segment's latest state in its original queue position.
-
-        CaptionStore has already rejected stale revisions and changes to a
-        final. Thus each segment's last queued update is its useful state:
-        either its durable final or its latest provisional. Preserve the first
-        enqueue time so repeated replacement cannot restart the active grace.
-        """
-        pending: dict[int, CaptionUpdate] = {}
-        by_segment: dict[int, int] = {}
-        for key, update in self._pending.items():
-            retained_key = by_segment.setdefault(update.segment, key)
-            pending[retained_key] = update
-        self._coalesced += len(self._pending) - len(pending)
-        self._pending = pending
-        self._by_segment = by_segment
-        self._queued_at = {key: self._queued_at[key] for key in pending}
-        self._active_count = sum(not update.final for update in pending.values())
-        self._pending_bytes = sum(len(update.to_json()) for update in pending.values())
-
-    def take_active_update(
-        self, provisional_grace: float = 0.0
-    ) -> CaptionUpdate | None:
-        """Take the oldest ready active segment, allowing finals to coexist."""
-        for key, update in self._pending.items():
-            if not update.final:
-                if self._clock() - self._queued_at[key] < provisional_grace:
-                    return None
-                return self._take(key)
-        return None
-
-    def next_update(
-        self, prefer_final: bool = False, provisional_grace: float = 0.0
-    ) -> CaptionUpdate | None:
-        """Normal FIFO, or final-first selection while catching up."""
-        if not self._pending:
-            return None
-        oldest = next(iter(self._pending))
-        if not (prefer_final and self._coalescing) or self._pending[oldest].final:
-            return self._take(oldest)
-        for key, update in self._pending.items():
-            if update.final:
-                return self._take(key)
-        return self.take_active_update(provisional_grace)
+        self._active_count = usage.active
+        self._pending_bytes = usage.bytes
 
     def _take(self, key: int) -> CaptionUpdate:
         update = self._pending.pop(key)
@@ -214,3 +187,24 @@ class OutboundBuffer:
         if not self._pending:
             self._pressure_active = False
         return update
+
+    def _compact(self) -> None:
+        """Keep latest values at first queue positions with their original ages."""
+        pending: dict[int, CaptionUpdate] = {}
+        by_segment: dict[int, int] = {}
+        for key, update in self._pending.items():
+            retained_key = by_segment.setdefault(update.segment, key)
+            pending[retained_key] = update
+
+        queued_at: dict[int, float] = {}
+        active = size = 0
+        for key, update in pending.items():
+            queued_at[key] = self._queued_at[key]
+            active += int(not update.final)
+            size += len(update.to_json())
+        self._coalesced += len(self._pending) - len(pending)
+        self._pending = pending
+        self._by_segment = by_segment
+        self._queued_at = queued_at
+        self._active_count = active
+        self._pending_bytes = size

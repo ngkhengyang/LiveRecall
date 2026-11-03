@@ -8,6 +8,6 @@ Layout:
     caption_store.py    revision/dedup state + bounded recovery history (pure logic)
     outbound_buffer.py  per-client bounded, coalescing send buffer (pure logic)
     source.py           the one caption-source connection
-    client.py           one browser / load-test client connection
+    client.py           Client lifecycle, LagPolicy, and ReplayCursor
     server.py           coordinator + CLI entry point
 """

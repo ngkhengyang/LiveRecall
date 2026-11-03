@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .protocol import CaptionUpdate, History
+from .protocol import CaptionUpdate
 
 
 class ReplayExpired(Exception):
@@ -75,7 +75,7 @@ class CaptionStore:
         self._active_segments: set[int] = set()
         # Accepted finals have contiguous sequence numbers independent of the
         # source's segment IDs. Dict insertion order preserves acceptance order;
-        # sequence lookup also lets each receiver read just its next batch.
+        # sequence lookup lets each receiver read its next outstanding final.
         self._final_history: dict[int, SegmentState] = {}
         self._final_tail = 0
         self._evicted_final_sequence = 0
@@ -178,41 +178,26 @@ class CaptionStore:
             raise ReplayExpired(f"Final for segment {update.segment} is not retained")
         return state.final_sequence
 
-    def read_final_batch(
-        self, after_sequence: int, max_items: int, max_bytes: int
-    ) -> tuple[list[CaptionUpdate], int]:
-        """Read a connected receiver's next bounded prefix of outstanding finals.
+    def read_next_final(self, after_sequence: int) -> tuple[CaptionUpdate, int] | None:
+        """Read the next outstanding final without advancing a receiver's cursor.
 
         This is continuous delivery from the shared 90-second log, independent
         of the requested reconnect-context window. Expired outstanding prefixes
         raise even when the log is empty; they must never be skipped silently.
-        Byte accounting includes HISTORY framing and item separators. One item
-        larger than the batch budget is returned alone so the sender can fall
-        back to an ordinary CAPTION_UPDATE without starving that final.
+        The caller sends one CAPTION_UPDATE and commits this sequence only
+        after success. Hello recovery framing and live burst limits belong
+        to their respective send paths, not this log lookup.
         """
-        if max_items <= 0 or max_bytes <= 0:
-            raise ValueError("Final batch limits must be positive")
         self._trim_history()
         if after_sequence < self._evicted_final_sequence:
             raise ReplayExpired(
                 f"Final replay after sequence {after_sequence} expired through "
                 f"{self._evicted_final_sequence}"
             )
-        items: list[CaptionUpdate] = []
-        next_sequence = after_sequence
-        size = len(History().to_json())
-        stop = min(self._final_tail, after_sequence + max_items)
-        for sequence in range(after_sequence + 1, stop + 1):
-            update = self._final_history[sequence].update
-            item_size = len(update.to_json()) + (2 if items else 0)
-            if items and size + item_size > max_bytes:
-                break
-            items.append(update)
-            size += item_size
-            next_sequence = sequence
-            if size > max_bytes:
-                break
-        return items, next_sequence
+        if after_sequence >= self._final_tail:
+            return None
+        sequence = after_sequence + 1
+        return self._final_history[sequence].update, sequence
 
     # -- bounds ---------------------------------------------------------
 
