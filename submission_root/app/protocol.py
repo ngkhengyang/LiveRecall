@@ -1,13 +1,8 @@
 """Typed wire messages for the LiveRecall protocol.
 
-Every message that crosses the WebSocket becomes a small frozen dataclass that
-knows how to validate itself out of JSON and serialize itself back. Nothing
-outside this module hand-assembles or hand-parses a protocol dict; the single
-exception is ``Server._accept``, which must peek at ``raw["type"]`` to know
-which class to hand the payload to (inherent to any JSON tagged union).
-
-``from_dict`` returns ``None`` on anything malformed instead of raising, so a
-badly formed frame can never take the server down.
+Connection handlers dispatch JSON tags; the state and delivery layers exchange
+frozen message objects. Caption/source-hello parsing rejects malformed values;
+client hellos and source-done notifications repair optional fields to defaults.
 """
 
 from __future__ import annotations
@@ -72,7 +67,7 @@ class ClientHello:
     history_seconds: float = 30.0
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ClientHello | None":
+    def from_dict(cls, raw: dict[str, Any]) -> "ClientHello":
         client_id = _as_int(raw.get("client_id", 0))
         session = raw.get("session", "L1")
         last_segment = _as_int(raw.get("last_segment", 0))
@@ -201,11 +196,19 @@ class History:
 
     items: list[CaptionUpdate] = field(default_factory=list)
 
+    _PREFIX = '{"type": "HISTORY", "items": ['
+    _SUFFIX = "]}"
+
     def to_dict(self) -> dict[str, Any]:
         return {"type": "HISTORY", "items": [item.to_dict() for item in self.items]}
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict())
+        # Captions already own their escaped JSON, including after batch sizing.
+        return (
+            self._PREFIX
+            + ", ".join(item.to_json() for item in self.items)
+            + self._SUFFIX
+        )
 
     @classmethod
     def batches(
@@ -223,11 +226,12 @@ class History:
         """
         if max_items <= 0 or max_bytes <= 0:
             raise ValueError("History batch limits must be positive")
-        envelope_bytes = len(cls().to_json().encode("utf-8"))
+        # Caption JSON is ASCII-escaped, so its character count is its byte size.
+        envelope_bytes = len(cls._PREFIX) + len(cls._SUFFIX)
         batch: list[CaptionUpdate] = []
         size = envelope_bytes
         for item in items:
-            item_bytes = len(item.to_json().encode("utf-8"))
+            item_bytes = len(item.to_json())
             separator_bytes = 2 if batch else 0
             if batch and (
                 len(batch) >= max_items
@@ -250,7 +254,7 @@ class SourceDone:
     segments: int | None = None
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "SourceDone | None":
+    def from_dict(cls, raw: dict[str, Any]) -> "SourceDone":
         session = raw.get("session", "L1")
         if not isinstance(session, str) or not session:
             session = "L1"

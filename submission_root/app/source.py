@@ -49,10 +49,9 @@ class Source:
                         self.server.ingest_caption_update(update)
                 elif kind == "SOURCE_DONE":
                     done = SourceDone.from_dict(payload)
-                    segments = done.segments if done else None
                     # Test-control only; the protocol does not require it to be
                     # forwarded to clients.
-                    print(f"source finished: segments={segments}", flush=True)
+                    print(f"source finished: segments={done.segments}", flush=True)
                 else:
                     # Forward compatibility: ignore message types and extra
                     # fields this server does not know about.

@@ -18,18 +18,7 @@ This file is deliberately a thin launcher. The implementation lives in the
 See diagrams/server_oop_design.md for the design these classes implement.
 """
 
-from __future__ import annotations
-
-import sys
-from pathlib import Path
-
-# The public harness starts this script from two different working directories
-# (test/submission_check.py uses submission_root/, test/run_demo.py uses the
-# repository root), so the package is resolved from this file's own location
-# rather than from the cwd.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from app.server import Server  # noqa: E402  (import follows the sys.path guard)
+from app.server import Server
 
 if __name__ == "__main__":
     Server.main()
