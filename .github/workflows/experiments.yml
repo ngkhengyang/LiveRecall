@@ -1,6 +1,15 @@
 name: Experiments
 
+# tc/netem scenarios need a real Linux kernel and root, which WSL lacks.
+# The work is split into shards; each shard runs on its own runner VM, so the
+# shards run in parallel and their `lo` qdisc changes cannot collide.
+#
+# - push to ci/tc-experiments: runs the fixed shard table below.
+# - workflow_dispatch: runs one custom shard from the inputs.
+
 on:
+  push:
+    branches: [ci/tc-experiments]
   workflow_dispatch:
     inputs:
       suite:
@@ -20,9 +29,45 @@ on:
         default: "true"
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          EVENT: ${{ github.event_name }}
+          SUITE: ${{ inputs.suite }}
+          ONLY: ${{ inputs.only }}
+          RUNS: ${{ inputs.runs }}
+          QUICK: ${{ inputs.quick }}
+          TC_ONLY: ${{ inputs.tc_only }}
+        run: |
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            matrix=$(jq -cn --arg s "$SUITE" --arg o "$ONLY" --arg r "$RUNS" \
+              --arg q "$QUICK" --arg t "$TC_ONLY" \
+              '{include:[{shard:"custom",suite:$s,only:$o,runs:$r,quick:$q,tc_only:$t}]}')
+          else
+            # H_base is included wherever checks reference ref:H_base.
+            matrix='{"include":[
+              {"shard":"t5","suite":"public","only":"T5","runs":"3","quick":"false","tc_only":"false"},
+              {"shard":"h3","suite":"hidden","only":"H3,H_base","runs":"3","quick":"false","tc_only":"false"},
+              {"shard":"h7","suite":"hidden","only":"H7,H_base","runs":"3","quick":"false","tc_only":"false"},
+              {"shard":"h8bw-ba","suite":"all","only":"H8_bandwidth,BA_bandwidth_2mbit","runs":"3","quick":"false","tc_only":"true"},
+              {"shard":"h11","suite":"hidden","only":"H11,H_base","runs":"3","quick":"false","tc_only":"false"}
+            ]}'
+            matrix=$(echo "$matrix" | jq -c .)
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   experiments:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    name: shard ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,7 +102,7 @@ jobs:
       - name: Record environment
         run: |
           {
-            echo "## Environment"
+            echo "## Environment (shard ${{ matrix.shard }})"
             echo
             echo '```'
             echo "kernel:  $(uname -r)"
@@ -71,11 +116,11 @@ jobs:
       - name: Run experiments
         continue-on-error: true
         env:
-          SUITE: ${{ inputs.suite }}
-          ONLY: ${{ inputs.only }}
-          RUNS: ${{ inputs.runs }}
-          QUICK: ${{ inputs.quick }}
-          TC_ONLY: ${{ inputs.tc_only }}
+          SUITE: ${{ matrix.suite }}
+          ONLY: ${{ matrix.only }}
+          RUNS: ${{ matrix.runs }}
+          QUICK: ${{ matrix.quick }}
+          TC_ONLY: ${{ matrix.tc_only }}
         run: |
           set -euo pipefail
           args=(--suite "$SUITE" --only "$ONLY" --runs "$RUNS")
@@ -91,7 +136,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: experiments-results
+          name: experiments-results-${{ matrix.shard }}
           path: output/experiments
 
       - name: Always reset the qdisc
