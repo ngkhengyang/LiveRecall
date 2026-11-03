@@ -16,7 +16,7 @@ import sys
 import time
 
 REPO = Path(__file__).resolve().parents[1]
-PYTHON = REPO / "venv/bin/python"
+DEFAULT_VENV = REPO / "venv"
 ARMS = ("with_probe", "no_probe")
 TESTS = {
     "t1": ["--clients", "20", "--duration", "20"],
@@ -69,6 +69,20 @@ METRICS = [
     ("recovery P95 ms", "recovery_p95_ms"),
 ]
 SKIPPED = "T5: SKIPPED (no passwordless sudo / sch_netem)"
+
+
+def resolve_python(venv):
+    """Return the interpreter for a venv folder, or the given interpreter path."""
+    venv = venv if venv.is_absolute() else Path.cwd() / venv
+    if venv.is_dir():
+        for candidate in ("bin/python", "Scripts/python.exe"):
+            python = venv / candidate
+            if python.is_file():
+                return python
+        raise ValueError(f"No Python interpreter found in virtual environment: {venv}")
+    if venv.is_file():
+        return venv
+    raise ValueError(f"--venv path does not exist: {venv}")
 
 
 def validate_out(path):
@@ -309,7 +323,7 @@ def run_arms(out, test, args, index, total):
             try:
                 result = subprocess.run(
                     [
-                        str(PYTHON),
+                        str(args.python),
                         "-u",
                         "test/run_demo.py",
                         *TESTS[test],
@@ -388,6 +402,13 @@ def main():
     parser.add_argument("--port", type=int, default=8811)
     parser.add_argument("--out", type=Path, default=Path("output/probe_ab"))
     parser.add_argument("--summary-only", action="store_true")
+    parser.add_argument(
+        "--venv",
+        type=Path,
+        default=DEFAULT_VENV,
+        help="virtual environment folder (or Python executable) used to run "
+        "the tests; default: ./venv",
+    )
     args = parser.parse_args()
     tests = args.tests.split(",")
     if (
@@ -401,6 +422,9 @@ def main():
     if args.runs < 1 or not 1 <= args.port <= 65535:
         parser.error("--runs must be positive and --port must be in 1..65535")
     out = validate_out(args.out if args.out.is_absolute() else REPO / args.out)
+    if not args.summary_only:
+        args.python = resolve_python(args.venv)
+        print(f"Using Python: {args.python}", flush=True)
     if args.summary_only:
         config = json.loads((out / "configuration.json").read_text(encoding="utf-8"))
         selected = list(config["test_args"]) if args.tests == ",".join(TESTS) else tests

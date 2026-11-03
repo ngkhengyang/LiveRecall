@@ -86,9 +86,17 @@ demo-caption:
 .PHONY: exp-probe exp-probe-quick
 
 # Full probe comparison, with progressive and final terminal summaries (~25 min).
+# Override the environment with: make exp-probe VENV=path/to/venv
+VENV ?= venv
+VENV_VM ?= venvVM
+
 exp-probe:
-	./venv/bin/python -u experiments/probe_ab.py
+	$(VENV)/bin/python -u experiments/probe_ab.py --venv $(VENV)
+
+exp-probe-VM:
+	$(VENV_VM)/bin/python -u experiments/probe_ab.py --venv $(VENV_VM)
+
 
 # One T1 run per arm for a quick harness check.
 exp-probe-quick:
-	./venv/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick
+	$(VENV)/bin/python -u experiments/probe_ab.py --tests t1 --runs 1 --out output/probe_ab_quick --venv $(VENV)
