@@ -37,6 +37,9 @@ import asyncio
 import contextlib
 import math
 import os
+import socket
+import struct
+import sys
 from typing import TYPE_CHECKING
 
 from websockets.exceptions import ConnectionClosed
@@ -121,6 +124,9 @@ class Client:
         self._rtt = 0.0
         self._sent_frames = 0
         self._pong_overdue = False
+        self._net_stall = False
+        self._loop_lag = 0.0
+        self._loop_lag_due = 0.0
         self._rate = 0.0
         self._pace_interval = 0.0
         self._next_send_at = 0.0
@@ -142,8 +148,81 @@ class Client:
         self._in_flight: CaptionUpdate | History | None = None
         self._tasks: list[asyncio.Task] = []
 
+    def _tcp_info(self) -> dict[str, int] | None:
+        """Read the stable Linux TCP_INFO prefix; other sockets fail soft."""
+        if sys.platform != "linux":
+            return None
+        try:
+            sock = self.ws.transport.get_extra_info("socket")
+            if sock is None:
+                return None
+            info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)
+            if len(info) < 104:
+                return None
+            return {
+                "retransmits": info[2],
+                "backoff": info[4],
+                **{
+                    name: struct.unpack_from("=I", info, offset)[0]
+                    for name, offset in (
+                        ("unacked", 24),
+                        ("lost", 32),
+                        ("retrans", 36),
+                        ("rtt", 68),
+                        ("rttvar", 72),
+                        ("total_retrans", 100),
+                    )
+                },
+            }
+        except (AttributeError, OSError, TypeError, ValueError, struct.error):
+            return None
+
+    @staticmethod
+    def _kernel_rtt(info: dict[str, int]) -> float:
+        return (info["rtt"] + 4 * info["rttvar"]) / 1_000_000.0
+
+    def _lag_sample(self) -> float:
+        # Include a late wake even if the sampler hasn't been scheduled yet.
+        pending = (
+            max(0.0, asyncio.get_running_loop().time() - self._loop_lag_due)
+            if self._loop_lag_due
+            else 0.0
+        )
+        return self._loop_lag + pending
+
+    async def _loop_lag_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            self._loop_lag_due = loop.time() + self.PROBE_INTERVAL_SECONDS
+            await asyncio.sleep(self.PROBE_INTERVAL_SECONDS)
+            self._loop_lag += max(0.0, loop.time() - self._loop_lag_due)
+
+    def _network_stall(
+        self,
+        before: dict[str, int] | None,
+        after: dict[str, int] | None,
+        elapsed: float,
+        loop_lag: float,
+    ) -> bool:
+        if before is None or after is None:
+            return False
+        # Retransmission/queueing delays pongs too; a slow app's kernel still
+        # ACKs promptly. Never learn a reader rate from a transport/loop stall.
+        return (
+            after["total_retrans"] > before["total_retrans"]
+            or any(
+                info[key] > 0
+                for info in (before, after)
+                for key in ("retransmits", "backoff", "lost")
+            )
+            or max(self._kernel_rtt(before), self._kernel_rtt(after)) >= elapsed * 0.5
+            or loop_lag >= elapsed * 0.5
+        )
+
     def _behind_threshold(self) -> float:
-        return max(self.BEHIND_AFTER_SECONDS, self.BEHIND_RTT_MULTIPLIER * self._rtt)
+        info = self._tcp_info()
+        baseline = max(self._rtt, self._kernel_rtt(info) if info else 0.0)
+        return max(self.BEHIND_AFTER_SECONDS, self.BEHIND_RTT_MULTIPLIER * baseline)
 
     def _resync_threshold(self) -> float:
         return max(
@@ -154,10 +233,9 @@ class Client:
 
     @property
     def _catchup(self) -> bool:
-        """True while a recently overdue pong still governs this client."""
+        """True while reader evidence governs delivery, independent of holds."""
         return (
-            self._pong_overdue
-            or self._pace_interval > 0.0
+            self._pace_interval > 0.0
             or asyncio.get_running_loop().time() < self._catchup_until
         )
 
@@ -186,6 +264,7 @@ class Client:
             self._sent_frames += 1
             self._tasks = [asyncio.create_task(self._sender_loop())]
             if "probe" not in ABLATIONS:
+                self._tasks.append(asyncio.create_task(self._loop_lag_loop()))
                 self._tasks.append(asyncio.create_task(self._probe_loop()))
             # Clients send nothing after the hello. This loop exists to notice
             # the disconnect and to let the library's keepalive run.
@@ -258,7 +337,7 @@ class Client:
                 while self._buffer.has_pending():
                     if self._buffer.should_close:
                         break
-                    if self._catchup:
+                    if self._pong_overdue or self._catchup:
                         # Keep ownership in the buffer until a consumption
                         # slot opens, so finals can join the same batch.
                         await self._hold()
@@ -287,6 +366,9 @@ class Client:
                         self._batches_sent += 1
                         self._batched_finals += len(delivery.items)
 
+                if not self._buffer.has_pending():
+                    # Ordinary delivery has drained the network backlog.
+                    self._net_stall = False
                 if self._buffer.should_close:
                     await self.ws.close(
                         self.TOO_FAR_BEHIND, "pending delivery capacity exhausted"
@@ -297,7 +379,8 @@ class Client:
 
     def _next_delivery(self) -> CaptionUpdate | History | None:
         """Batch unsent finals only during catch-up or actual queue pressure."""
-        catching_up = self._catchup or self._buffer.pressured
+        # Network backlog drains as ordinary updates, even above the soft limit.
+        catching_up = self._catchup or (self._buffer.pressured and not self._net_stall)
         grace = 0.0 if "grace" in ABLATIONS else self.PROVISIONAL_GRACE_SECONDS
         if catching_up:
             # Spend each slow-reader slot on all available finals before a
@@ -306,8 +389,8 @@ class Client:
             if items:
                 return History(items)
         delivery = self._buffer.next_update(
-            prefer_final=catching_up,
-            provisional_grace=grace,
+            prefer_final=catching_up or self._net_stall,
+            provisional_grace=grace if catching_up else 0.0,
         )
         return delivery
 
@@ -375,6 +458,8 @@ class Client:
 
     async def _finish_consumption_probe(self, sent_at: float, sent_frames: int) -> None:
         """Include the separation gap in the real frame's consumption delay."""
+        loop = asyncio.get_running_loop()
+        lag_at = self._lag_sample()
         try:
             await asyncio.sleep(
                 max(
@@ -387,21 +472,38 @@ class Client:
             if self._sent_frames != sent_frames or self._pong_overdue:
                 self._recovery_confirmations = 0
                 return
+            tcp_at = self._tcp_info()
+            ping_at = loop.time()
             pong = await self.ws.ping()
             await asyncio.wait_for(
                 asyncio.shield(pong), timeout=self._behind_threshold()
             )
         except asyncio.TimeoutError:
+            self._recovery_confirmations = 0
+            if self._network_stall(
+                tcp_at,
+                self._tcp_info(),
+                loop.time() - ping_at,
+                self._lag_sample() - lag_at,
+            ):
+                return
             self._consumption_probe_interval = min(
                 self.CONSUMPTION_PROBE_MAX_INTERVAL,
                 2.0 * self._consumption_probe_interval,
             )
-            self._recovery_confirmations = 0
             return
         except ConnectionClosed:
             self._recovery_confirmations = 0
             return
-        now = asyncio.get_running_loop().time()
+        now = loop.time()
+        if self._network_stall(
+            tcp_at,
+            self._tcp_info(),
+            now - sent_at,
+            self._lag_sample() - lag_at,
+        ):
+            self._recovery_confirmations = 0
+            return
         offered_rate = self._offered_rate * math.exp(
             -(now - self._offered_at) / self.OFFERED_RATE_WINDOW_SECONDS
         )
@@ -461,6 +563,9 @@ class Client:
                 self._backlog_probe_done.clear()
                 sent_frames = self._sent_frames
                 ping_at = loop.time()
+                tcp_at = self._tcp_info()
+                lag_at = self._lag_sample()
+                network_stall = False
                 pong = await self.ws.ping()
                 overdue = False
                 try:
@@ -476,8 +581,13 @@ class Client:
                     overdue = True
                     self._pong_overdue = True
                     self._recovery_confirmations = 0
-                    self._catchup_until = loop.time() + self.CATCHUP_STICKY_SECONDS
-                    self._pace_interval *= self.PACING_BACKOFF
+                    network_stall = self._network_stall(
+                        tcp_at,
+                        self._tcp_info(),
+                        loop.time() - ping_at,
+                        self._lag_sample() - lag_at,
+                    )
+                    self._net_stall = network_stall
                     self._wake.set()
                     self._probe_tick.set()
                     try:
@@ -504,6 +614,18 @@ class Client:
                 now = loop.time()
                 self._drain_estimate(now)
                 if overdue:
+                    network_stall = (
+                        self._network_stall(
+                            tcp_at,
+                            self._tcp_info(),
+                            now - ping_at,
+                            self._lag_sample() - lag_at,
+                        )
+                        or network_stall
+                    )
+                    self._net_stall = network_stall
+                if overdue and not network_stall:
+                    self._pace_interval *= self.PACING_BACKOFF
                     stall = max(0.0, now - ping_at - self._rtt)
                     frames = sent_frames - acknowledged_frames
                     if frames > 0:
@@ -535,6 +657,10 @@ class Client:
                     measured_at = now
                     acknowledged_frames = sent_frames
                     self._catchup_until = now + self.CATCHUP_STICKY_SECONDS
+                elif overdue:
+                    # Exclude the network episode from the next reader sample.
+                    measured_at = now
+                    acknowledged_frames = sent_frames
                 self._pong_overdue = False
                 self._probe_tick.set()
                 self._wake.set()
