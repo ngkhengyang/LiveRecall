@@ -21,6 +21,13 @@ install:
 install-VM:
 	pip install -r submission_root/requirements.txt
 	pip install -r config/requirements-dev.txt
+	sudo apt install -y iproute2
+	sudo apt install -y linux-modules-extra-$(uname -r)   # Ubuntu ships netem here; skip if modprobe already works
+	sudo modprobe sch_netem
+	sudo tc qdisc add dev lo root netem delay 1ms && sudo tc qdisc del dev lo root && echo "netem OK"
+	echo "$USER ALL=(root) NOPASSWD: $(command -v tc)" | sudo tee /etc/sudoers.d/liverecall-tc
+	sudo chmod 440 /etc/sudoers.d/liverecall-tc
+	sudo -n tc qdisc show dev lo && echo "passwordless tc OK"
 
 
 # Basic public experiment (20 clients, 20 seconds, one run).
