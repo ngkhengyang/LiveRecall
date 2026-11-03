@@ -3,7 +3,8 @@ SHELL := /bin/bash
 .PHONY: install check check-final \
 	demo-basic demo-server demo-report demo-browser demo-caption \
 	t1-basic t2-scale t3-slow t3-monitor t4-reconnect \
-	t5-network t5-network-enable t5-network-reset
+	t5-network t5-network-enable t5-network-reset \
+	report
 
 
 # START_HERE.md
@@ -31,6 +32,10 @@ demo-report:
 # Validate the submission structure and WebSocket startup path.
 check:
 	./venv/bin/python test/submission_check.py
+
+# Convert docs/REPORT.md into submission_root/report.pdf.
+report:
+	./venv/bin/python config/build_report.py
 
 # Also require the final submission documents and report.
 check-final:
