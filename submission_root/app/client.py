@@ -153,6 +153,10 @@ class Client:
         self._sent_frames = 0
         self._pong_overdue = False
         self._net_stall = False
+        self._queue_paced = False
+        self._queue_confirmations = 0
+        self._min_srtt = 0.0
+        self._recovery_connection = hello.last_segment > 0
         self._drain_blocked = False
         self._lag_monitor: _LoopLagMonitor | None = None
         self._tcp_cached: dict[str, int] | None = None
@@ -217,6 +221,11 @@ class Client:
     def _sample_tcp_info(self) -> dict[str, int] | None:
         self._tcp_cached = self._tcp_info()
         self._tcp_checked_at = asyncio.get_running_loop().time()
+        if self._tcp_cached and self._tcp_cached["rtt"] > 0:
+            srtt = self._tcp_cached["rtt"] / 1_000_000.0
+            self._min_srtt = min(self._min_srtt or srtt, srtt)
+            if srtt > max(2 * self._min_srtt, self._min_srtt + 0.02):
+                self._queue_confirmations = 0
         return self._tcp_cached
 
     def _lag_sample(self) -> float:
@@ -228,11 +237,11 @@ class Client:
         after: dict[str, int] | None,
         elapsed: float,
         loop_lag: float,
-    ) -> bool:
+    ) -> str | None:
         if loop_lag >= elapsed * 0.5:
-            return True
+            return "loop"
         if before is None or after is None:
-            return False
+            return None
         # Backoff/probes also describe zero-window readers, not just loss.
         retransmission = after["total_retrans"] > before["total_retrans"] or any(
             info.get("retransmits", 0) > 0
@@ -248,11 +257,11 @@ class Client:
                 for info in (before, after)
             ),
         )
-        return (
-            retransmission
-            and elapsed <= loss_budget
-            or max(self._kernel_rtt(before), self._kernel_rtt(after)) >= elapsed * 0.5
-        )
+        if retransmission and elapsed <= loss_budget:
+            return "loss"
+        if max(self._kernel_rtt(before), self._kernel_rtt(after)) >= elapsed * 0.5:
+            return "queue"
+        return None
 
     def _behind_threshold(self) -> float:
         info = self._tcp_cached
@@ -284,6 +293,7 @@ class Client:
             self.hello.last_revision,
             self.hello.history_seconds,
         )
+        self._recovery_connection |= bool(items)
         print(
             f"client connected: id={self.hello.client_id}; "
             f"resume=({self.hello.last_segment},{self.hello.last_revision}); "
@@ -305,6 +315,18 @@ class Client:
             )
             if sock is not None and lowat is not None:
                 sock.setsockopt(socket.IPPROTO_TCP, lowat, 16384)
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+
+        try:
+            sock = self.ws.transport.get_extra_info("socket")
+            thin = getattr(
+                socket,
+                "TCP_THIN_LINEAR_TIMEOUTS",
+                16 if sys.platform == "linux" else None,
+            )
+            if sock is not None and thin is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, thin, 1)
         except (AttributeError, OSError, TypeError, ValueError):
             pass
 
@@ -417,11 +439,24 @@ class Client:
                         break
                     # Dequeue transfers ownership to this in-flight message;
                     # completing send is not an application-level client ACK.
-                    self._in_flight = delivery
                     sent_at = asyncio.get_running_loop().time()
-                    await self._send_frame(delivery.to_json())
-                    self._sent_frames += 1
-                    self._frames_sent.set()
+                    final_slot = (
+                        self._recovery_connection
+                        and (self._catchup or self._buffer.pressured)
+                        and not self._net_stall
+                        and isinstance(delivery, CaptionUpdate)
+                        and delivery.final
+                    )
+                    while True:
+                        self._in_flight = delivery
+                        await self._send_frame(delivery.to_json())
+                        self._sent_frames += 1
+                        self._frames_sent.set()
+                        if not final_slot:
+                            break
+                        delivery = self._next_recovery_final()
+                        if delivery is None:
+                            break
                     if self._pace_interval and not self._net_stall:
                         now = asyncio.get_running_loop().time()
                         self._drain_estimate(now)
@@ -498,7 +533,11 @@ class Client:
         # Network backlog drains as ordinary updates, even above the soft limit.
         catching_up = (self._catchup or self._buffer.pressured) and not self._net_stall
         grace = 0.0 if "grace" in ABLATIONS else self.PROVISIONAL_GRACE_SECONDS
-        if catching_up:
+        if catching_up and self._recovery_connection:
+            delivery = self._next_recovery_final()
+            if delivery is not None:
+                return delivery
+        elif catching_up:
             # Spend each slow-reader slot on all available finals before a
             # provisional; the newest active revision remains in the buffer.
             items = self._buffer.take_final_batch()
@@ -509,6 +548,15 @@ class Client:
             provisional_grace=grace if catching_up else 0.0,
         )
         return delivery
+
+    def _next_recovery_final(self) -> CaptionUpdate | None:
+        # On resumed connections HISTORY is the hello recovery reply; a second
+        # HISTORY would make the recovery point ambiguous.
+        segment = min(
+            (key for key, item in self._buffer._pending.items() if item.final),
+            default=None,
+        )
+        return self._buffer._take(segment) if segment is not None else None
 
     def _drain_estimate(self, now: float) -> None:
         self._unread_frames = max(
@@ -542,6 +590,7 @@ class Client:
         """Measure consumption after a real paced frame, with bounded padding."""
         if (
             "probe" in ABLATIONS
+            or self._queue_paced
             or not self._pace_interval
             or self._pong_overdue
             or not self._backlog_probe_done.is_set()
@@ -596,13 +645,16 @@ class Client:
             )
         except asyncio.TimeoutError:
             self._recovery_confirmations = 0
-            if self._network_stall(
+            kind = self._network_stall(
                 tcp_at,
                 self._sample_tcp_info(),
                 loop.time() - ping_at,
                 self._lag_sample() - lag_at,
-            ):
+            )
+            if kind in ("loss", "loop"):
                 return
+            self._queue_paced = kind == "queue"
+            self._queue_confirmations = 0
             self._consumption_probe_interval = min(
                 self.CONSUMPTION_PROBE_MAX_INTERVAL,
                 2.0 * self._consumption_probe_interval,
@@ -612,14 +664,6 @@ class Client:
             self._recovery_confirmations = 0
             return
         now = loop.time()
-        if self._network_stall(
-            tcp_at,
-            self._sample_tcp_info(),
-            now - sent_at,
-            self._lag_sample() - lag_at,
-        ):
-            self._recovery_confirmations = 0
-            return
         offered_rate = self._offered_rate * math.exp(
             -(now - self._offered_at) / self.OFFERED_RATE_WINDOW_SECONDS
         )
@@ -631,6 +675,19 @@ class Client:
             self._consumption_probe_interval = self.CONSUMPTION_PROBE_INTERVAL
             self._recovery_confirmations += 1
         else:
+            self._recovery_confirmations = 0
+            kind = None
+            if (now - sent_at) * offered_rate >= self.RECOVERY_UTILISATION:
+                kind = self._network_stall(
+                    tcp_at,
+                    self._sample_tcp_info(),
+                    now - sent_at,
+                    self._lag_sample() - lag_at,
+                )
+            if kind in ("loss", "loop"):
+                return
+            self._queue_paced = kind == "queue"
+            self._queue_confirmations = 0
             self._consumption_probe_interval = min(
                 self.CONSUMPTION_PROBE_MAX_INTERVAL,
                 2.0 * self._consumption_probe_interval,
@@ -646,15 +703,37 @@ class Client:
             self._pace_interval = self.PACING_MARGIN / self._rate
             self._probe_tick.set()
         if self._recovery_confirmations >= self.RECOVERY_CONFIRMATIONS:
-            self._pace_interval = 0.0
-            self._rate = 0.0
-            self._next_send_at = 0.0
-            self._unread_frames = 0.0
-            self._unread_at = now
-            self._catchup_until = 0.0
-            self._recovery_confirmations = 0
-            self._probe_tick.set()
-            self._wake.set()
+            self._reset_pacing(now)
+
+    def _reset_pacing(self, now: float) -> None:
+        self._pace_interval = 0.0
+        self._rate = 0.0
+        self._next_send_at = 0.0
+        self._unread_frames = 0.0
+        self._unread_at = now
+        self._catchup_until = 0.0
+        self._recovery_confirmations = 0
+        self._queue_paced = False
+        self._queue_confirmations = 0
+        self._probe_tick.set()
+        self._wake.set()
+
+    def _queue_prompt(self, now: float) -> None:
+        info = self._sample_tcp_info()
+        if not self._queue_paced:
+            return
+        if (
+            info
+            and self._min_srtt > 0.0
+            and 0
+            < info["rtt"] / 1_000_000.0
+            <= max(2 * self._min_srtt, self._min_srtt + 0.02)
+        ):
+            self._queue_confirmations += 1
+            if self._queue_confirmations >= 2:
+                self._reset_pacing(now)
+        else:
+            self._queue_confirmations = 0
 
     async def _probe_loop(self) -> None:
         """Keep one ordinary backlog ping in flight and publish the verdict.
@@ -710,7 +789,7 @@ class Client:
                 last_ping_frames = sent_frames
                 tcp_at = self._sample_tcp_info()
                 lag_at = self._lag_sample()
-                network_stall = False
+                network_stall = None
                 pong = await self.ws.ping()
                 overdue = False
                 try:
@@ -732,7 +811,10 @@ class Client:
                         loop.time() - ping_at,
                         self._lag_sample() - lag_at,
                     )
-                    self._net_stall = network_stall
+                    self._net_stall = network_stall in ("loss", "loop")
+                    self._queue_confirmations = 0
+                    if network_stall is None:
+                        self._queue_paced = False
                     self._wake.set()
                     self._probe_tick.set()
                     try:
@@ -759,6 +841,7 @@ class Client:
                 now = loop.time()
                 if not overdue:
                     prompt_frames = self._sent_frames
+                    self._queue_prompt(now)
                 self._drain_estimate(now)
                 if overdue:
                     network_stall = self._network_stall(
@@ -767,8 +850,12 @@ class Client:
                         now - ping_at,
                         self._lag_sample() - lag_at,
                     )
-                    self._net_stall = network_stall
-                if overdue and not network_stall:
+                    self._net_stall = network_stall in ("loss", "loop")
+                    self._queue_confirmations = 0
+                    if network_stall is None:
+                        self._queue_paced = False
+                if overdue and network_stall in (None, "queue"):
+                    self._queue_paced = network_stall == "queue"
                     self._pace_interval *= self.PACING_BACKOFF
                     stall = max(0.0, now - ping_at - self._rtt)
                     frames = sent_frames - acknowledged_frames
@@ -802,6 +889,8 @@ class Client:
                     acknowledged_frames = sent_frames
                     self._catchup_until = now + self.CATCHUP_STICKY_SECONDS
                 elif overdue:
+                    # A loss/loop stall says nothing about the reader: keep any
+                    # existing reader pacing, but take no sample from it.
                     # Exclude the network episode from the next reader sample.
                     measured_at = now
                     acknowledged_frames = sent_frames
