@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 
 def _as_int(value: Any) -> int | None:
@@ -206,6 +206,40 @@ class History:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
+
+    @classmethod
+    def batches(
+        cls,
+        items: Iterable[CaptionUpdate],
+        max_items: int = 64,
+        max_bytes: int = 256 * 1024,
+    ) -> Iterator["History"]:
+        """Split a snapshot into ordered, independently valid HISTORY messages.
+
+        Account for the complete JSON envelope, separators and escaped text.
+        A caption larger than the byte target travels alone, without truncation;
+        it must still fit the receiving peer's message limit. Empty context
+        produces one empty HISTORY, preserving the hello response contract.
+        """
+        if max_items <= 0 or max_bytes <= 0:
+            raise ValueError("History batch limits must be positive")
+        envelope_bytes = len(cls().to_json().encode("utf-8"))
+        batch: list[CaptionUpdate] = []
+        size = envelope_bytes
+        for item in items:
+            item_bytes = len(item.to_json().encode("utf-8"))
+            separator_bytes = 2 if batch else 0
+            if batch and (
+                len(batch) >= max_items
+                or size + separator_bytes + item_bytes > max_bytes
+            ):
+                yield cls(batch)
+                batch = []
+                size = envelope_bytes
+                separator_bytes = 0
+            batch.append(item)
+            size += separator_bytes + item_bytes
+        yield cls(batch)
 
 
 @dataclass(frozen=True)
