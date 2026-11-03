@@ -419,7 +419,7 @@ class ClientReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(client._buffer.pending, 4)
         sender = asyncio.create_task(client._sender_loop())
         try:
-            await eventually(lambda: client._last_sent_final_sequence == 100)
+            await eventually(lambda: client._last_sent_final_sequence == 100, 10)
             received = [
                 item["segment"] for msg in ws.messages for item in final_items(msg)
             ]

@@ -10,7 +10,7 @@ protocol parsing, authoritative caption state, and independent per-client delive
 
 ```text
 caption_source.py -> Source -> Server -> CaptionStore / shared final log
-                                | enqueue             | replay batches
+                                | enqueue             | replay finals
                                 v                     v
                      per-client FIFO / active state -> sender -> browser
 ```
@@ -94,7 +94,7 @@ source/client wall clocks.
 
 Normal delivery preserves every revision in a per-client FIFO. Lag or queue
 pressure switches the existing connection to shared-log replay: pending finals
-leave the local buffer, and the sender reads batches after its committed cursor.
+leave the local buffer, and the sender reads finals after its committed cursor.
 Subsequent finals only wake the sender and remove any corresponding active
 entry. Locally retained active state is coalesced without resetting its original
 enqueue age. The soft threshold is 256 updates; final/byte admission overflow
@@ -102,10 +102,12 @@ also attempts replay instead of routinely disconnecting. Latest active state
 must still fit within 4,000 entries and 4 MiB of pending JSON. One in-flight
 message and transport buffers lie outside these limits.
 
-Replay batches contain at most 64 finals and 256 KiB including `HISTORY` framing;
-a single large final uses `CAPTION_UPDATE`. Four consecutive final batches allow
-a ready active update a turn. Active updates have a one-second grace period;
-lagged sending waits for the next completed probe instead of feeding a stalled
+All live replay uses individual `CAPTION_UPDATE` messages; `HISTORY` is reserved
+for the response to `CLIENT_HELLO`. Four consecutive finals allow a ready active
+update a turn. Active updates have a one-second grace period. During lag,
+sending waits for a completed probe before each window of up to 64 updates,
+or until sent bytes reach 256 KiB; a single caption can cross the byte threshold.
+The next window waits for another completed probe instead of feeding a stalled
 transport periodically. The probe's terminal deadline and cleanup bound that wait.
 The sender resolves a message's sequence before sending and commits progress
 after success. Once replay catches up, active work drains and lag clears, a

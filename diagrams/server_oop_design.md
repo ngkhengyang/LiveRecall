@@ -201,7 +201,7 @@ behavior below is testable without real time passing.
 - `self._by_segment: dict[int, int]` — segment-to-queue-ID index used only while
   coalescing; each segment then has exactly one pending entry.
 - `MAX_PENDING_UPDATES = 256` — soft backlog threshold activating compaction and
-  catch-up batching until the queue drains.
+  shared-log catch-up until the queue drains.
 - Buffer admission bounds: 4096 pending finals, 4000 active segments and 4 MiB pending
   JSON. Client-side replay moves final ownership to the shared log; latest active
   state remains locally bounded.
@@ -222,7 +222,7 @@ behavior below is testable without real time passing.
   counters (coalesced/rejected counts are printed on disconnect).
 - `next_update(prefer_final=False, provisional_grace=0.0) -> CaptionUpdate | None` —
   normal FIFO or coalesced selection; replay uses `take_active_update(grace)` locally
-  and obtains final batches through `Server.read_final_batch`.
+  and reads one final at a time through `Server.read_final_batch`.
 
 **Private helper**
 - `_compact()` — discard only superseded provisional revisions, retaining each
@@ -304,15 +304,15 @@ transition releases local final entries.
 
 **`_next_delivery()`** selects a message together with its sequence watermark. Normal
 delivery takes a FIFO update and resolves a final's sequence before sending. Catch-up
-reads at most 64 finals/256 KiB after the committed cursor; one-item batches use
-CAPTION_UPDATE and larger batches use HISTORY. After four consecutive final batches,
+reads one final after the committed cursor and sends it as `CAPTION_UPDATE`.
+`HISTORY` is sent only in response to `CLIENT_HELLO`. After four consecutive finals,
 a ready active update gets a turn. Active state has a one-second provisional grace.
 When the log is caught up, active work is empty and lag clears, the sender atomically
 returns to normal mode. `ReplayExpired` explicitly fails a missing retained prefix.
 
 **`_sender_loop()`** remains the only caption sender. A mode change during an in-flight
 send cannot start a competing replay. It awaits `_send`, commits the selected cursor
-on success, and only then selects another batch. Send completion is not an application
+on success, and only then selects another update. Send completion is not an application
 ACK; this cursor is scoped to the current ordered WebSocket connection.
 
 **`_probe_loop()`** owns one `_round_trip()` task, including both `await ws.ping()` and
@@ -329,7 +329,9 @@ an indirect connection-lag signal, not proof of application consumption.
 budget; `_send()` also covers initial HISTORY. `_close()` allows two seconds for the
 closing handshake, then aborts the transport. This bounds blocked ping initiation,
 blocked sends and closing, not just the pong wait. A sender in catch-up waits for
-the next completed probe instead of feeding a stalled transport periodically;
+the next completed probe before each window of up to 64 updates or until sent
+bytes reach 256 KiB (one caption can cross that byte threshold), rather than
+feeding a stalled transport periodically;
 the probe's terminal deadline and cleanup release bound that wait. Outstanding finals can outlive
 the requested 60-second context window while retained in the shared 90-second log,
 but horizon expiry, persistent active-state overflow and terminal stalls remain
@@ -442,6 +444,10 @@ initial-HISTORY races, and bounded ping/pong/close cleanup. It includes an opt-i
 65-second transport-stall scenario. Read its run instructions and record actual outcomes
 for the implementation commit being evaluated; the existence of these tests is not a
 claim that current public or hidden workloads have passed.
+
+`test/test_live_delivery.py` additionally verifies individual live frames,
+latest-active fairness, bounded probe windows and exactly one initial HISTORY
+under real WebSocket queue pressure.
 
 Use `test/submission_check.py` for entry-point compatibility and the unchanged public
 harness for T1–T5. Run each reported experiment at least three independent times and

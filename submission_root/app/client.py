@@ -57,7 +57,7 @@ class Client:
     # revision is normally replaced in place by its own final and one message
     # carries what three would have.
     PROVISIONAL_GRACE_SECONDS = 1.0
-    MAX_FINAL_BATCHES_BEFORE_ACTIVE = 4
+    MAX_FINALS_BEFORE_ACTIVE = 4
 
     def __init__(self, ws, hello: ClientHello, server: "Server") -> None:
         self.ws = ws
@@ -69,10 +69,8 @@ class Client:
         self._catchup_until = 0.0
         self._rtt = 0.0
         self._held = 0
-        self._batches_sent = 0
-        self._batched_finals = 0
-        self._final_batches_since_active = 0
-        self._in_flight: CaptionUpdate | History | None = None
+        self._finals_since_active = 0
+        self._in_flight: CaptionUpdate | None = None
         self._tasks: list[asyncio.Task] = []
         self._pending_probe: asyncio.Task | None = None
         self._last_sent_final_sequence = 0
@@ -138,8 +136,7 @@ class Client:
             print(
                 f"client disconnected: id={self.hello.client_id}; "
                 f"coalesced={self._buffer.coalesced}; rejected={self._buffer.rejected}; "
-                f"held={self._held}; batches={self._batches_sent}; "
-                f"batched_finals={self._batched_finals}; clients={self.server.client_count}",
+                f"held={self._held}; clients={self.server.client_count}",
                 flush=True,
             )
 
@@ -204,15 +201,21 @@ class Client:
                 # sets the event, so an enqueue racing this clear is still seen
                 # by the has_pending check below.
                 self._wake.clear()
+                sent_items = 0
+                sent_bytes = 0
 
                 while self._buffer.has_pending() or self._replaying:
                     if self._buffer.should_close:
                         break
-                    if self._catchup:
-                        # Wait for actual probe progress instead of feeding an
-                        # already stalled transport every half second. Finals
-                        # remain in the shared log while this sender pauses.
+                    if self._catchup and (
+                        sent_items == 0
+                        or sent_items >= self._buffer.MAX_BATCH_ITEMS
+                        or sent_bytes >= self._buffer.MAX_BATCH_BYTES
+                    ):
+                        # Preserve the bounded probe window, using individual live frames.
                         await self._hold()
+                        sent_items = 0
+                        sent_bytes = 0
                         if self._buffer.should_close:
                             break
                     selected = self._next_delivery()
@@ -229,9 +232,8 @@ class Client:
                         return
                     self._last_sent_final_sequence = through_sequence
                     self._in_flight = None
-                    if isinstance(delivery, History):
-                        self._batches_sent += 1
-                        self._batched_finals += len(delivery.items)
+                    sent_items += 1
+                    sent_bytes += len(delivery.to_json())
 
                 if self._buffer.should_close:
                     await self._close("latest active state exceeds delivery capacity")
@@ -241,38 +243,35 @@ class Client:
         except ConnectionClosed:
             return
 
-    def _next_delivery(self) -> tuple[CaptionUpdate | History, int] | None:
+    def _next_delivery(self) -> tuple[CaptionUpdate, int] | None:
         """Select one message and its cursor; only the sender commits progress."""
         if not self._replaying and (self._catchup or self._buffer.pressured):
             self._enter_replay()
         if self._replaying:
-            # Continuing final batches must not starve active segments.
-            if self._final_batches_since_active >= self.MAX_FINAL_BATCHES_BEFORE_ACTIVE:
+            # Continuing finals must not starve active segments.
+            if self._finals_since_active >= self.MAX_FINALS_BEFORE_ACTIVE:
                 active = self._buffer.take_active_update(self.PROVISIONAL_GRACE_SECONDS)
                 if active is not None:
-                    self._final_batches_since_active = 0
+                    self._finals_since_active = 0
                     return active, self._last_sent_final_sequence
             items, through_sequence = self.server.read_final_batch(
                 self._last_sent_final_sequence,
-                self._buffer.MAX_BATCH_ITEMS,
+                1,
                 self._buffer.MAX_BATCH_BYTES,
             )
             if items:
-                self._final_batches_since_active += 1
-                # A single large final must not gain a HISTORY wrapper that
-                # would turn an otherwise valid caption into an oversized frame.
-                message = items[0] if len(items) == 1 else History(items)
-                return message, through_sequence
+                self._finals_since_active += 1
+                return items[0], through_sequence
             active = self._buffer.take_active_update(self.PROVISIONAL_GRACE_SECONDS)
             if active is not None:
-                self._final_batches_since_active = 0
+                self._finals_since_active = 0
                 return active, self._last_sent_final_sequence
             # Query and transition contain no await: new arrivals cannot land
             # between the caught-up check and resuming normal FIFO delivery.
             if not self._catchup and not self._buffer.has_pending():
                 self._replaying = False
                 self._buffer.set_overloaded(False)
-                self._final_batches_since_active = 0
+                self._finals_since_active = 0
                 self._normal_trial_started = asyncio.get_running_loop().time()
             return None
         delivery = self._buffer.next_update()
@@ -282,7 +281,7 @@ class Client:
         if delivery.final:
             through_sequence = self.server.final_sequence(delivery)
         else:
-            self._final_batches_since_active = 0
+            self._finals_since_active = 0
         return delivery, through_sequence
 
     async def _send(self, delivery: CaptionUpdate | History) -> bool:

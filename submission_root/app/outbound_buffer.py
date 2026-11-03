@@ -12,13 +12,13 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from .protocol import CaptionUpdate, History
+from .protocol import CaptionUpdate
 
 
 class OutboundBuffer:
     """Independent limits for pending finals, active segments, and wire bytes.
 
-    A 256-update backlog or byte pressure activates coalescing and batching
+    A 256-update backlog or byte pressure activates coalescing and replay
     until the queue drains. Client lag can also enable coalescing explicitly.
     Exceeding a hard limit after compaction refuses new buffered work. The
     owning Client can switch finals to shared-log replay instead of closing.
@@ -179,36 +179,6 @@ class OutboundBuffer:
         self._queued_at = {key: self._queued_at[key] for key in pending}
         self._active_count = sum(not update.final for update in pending.values())
         self._pending_bytes = sum(len(update.to_json()) for update in pending.values())
-
-    def take_final_batch(self) -> list[CaptionUpdate]:
-        """Transfer unsent finals to a bounded HISTORY batch, oldest first.
-
-        This is pending delivery, not time-filtered recovery: even a final
-        queued more than 60 seconds ago stays eligible. A final too large for
-        a batch remains pending for ordinary CAPTION_UPDATE delivery. Batching
-        is disabled during normal delivery to preserve revision order.
-        """
-        if not self._coalescing:
-            return []
-        items = []
-        keys = []
-        size = len(History().to_json())
-        for key, update in sorted(
-            self._pending.items(), key=lambda item: item[1].segment
-        ):
-            if not update.final:
-                continue
-            item_size = len(update.to_json()) + (2 if items else 0)
-            if size + item_size > self.MAX_BATCH_BYTES:
-                break
-            items.append(update)
-            keys.append(key)
-            size += item_size
-            if len(items) >= self.MAX_BATCH_ITEMS:
-                break
-        for key in keys:
-            self._take(key)
-        return items
 
     def take_active_update(
         self, provisional_grace: float = 0.0
