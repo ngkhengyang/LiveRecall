@@ -101,6 +101,7 @@ class Client:
     # 120 ms +/- 30 ms with 3% loss, which a fixed threshold would read as a
     # stalled reader.
     BEHIND_AFTER_SECONDS = 0.5
+    LOSS_ISOLATION_SECONDS = 5.0
     # How long one overdue pong keeps this client in catch-up mode. A reader
     # that is behind drains just enough to answer a ping and then falls back,
     # so without a sticky window the sender resumes flooding the moment a
@@ -152,6 +153,7 @@ class Client:
         self._rtt = 0.0
         self._sent_frames = 0
         self._pong_overdue = False
+        self._last_overdue_at = -math.inf
         self._net_stall = False
         self._queue_paced = False
         self._queue_confirmations = 0
@@ -204,6 +206,7 @@ class Client:
                         ("unacked", 24),
                         ("lost", 32),
                         ("retrans", 36),
+                        ("last_ack_recv", 56),
                         ("rtt", 68),
                         ("rttvar", 72),
                         ("snd_cwnd", 80),
@@ -237,23 +240,21 @@ class Client:
         after: dict[str, int] | None,
         elapsed: float,
         loop_lag: float,
+        repeated_overdue: bool = False,
     ) -> str | None:
         if loop_lag >= elapsed * 0.5:
             return "loop"
+        if repeated_overdue:
+            return None
         if before is None or after is None:
             return None
-        # Backoff/probes also describe zero-window readers, not just loss.
-        retransmission = after["total_retrans"] > before["total_retrans"] or any(
-            info.get("retransmits", 0) > 0
-            or info.get("ca_state", 0) in (3, 4)
-            or info.get("lost", 0) > 0
-            for info in (before, after)
-        )
+        # Only retransmissions during this ping can explain its delay.
+        retransmission = after["total_retrans"] > before["total_retrans"]
         # Incidental loss cannot explain a reader's multi-second stall.
         loss_budget = max(
-            1.0,
+            0.5,
             max(
-                2 * (info.get("rto", 0) + info["rtt"]) / 1_000_000.0
+                (info.get("rto", 0) + info["rtt"]) / 1_000_000.0
                 for info in (before, after)
             ),
         )
@@ -504,12 +505,22 @@ class Client:
         )
 
     async def _hold_tcp_loss(self) -> None:
+        if self._pace_interval > 0 and not self._queue_paced:
+            return
         loop = asyncio.get_running_loop()
         now = loop.time()
         info = self._tcp_cached
         if now - self._tcp_checked_at >= 0.02:
             info = self._sample_tcp_info()
-        while info and (info["ca_state"] in (3, 4) or info["retransmits"] > 0):
+        while info and (
+            info["ca_state"] in (3, 4)
+            or info["retransmits"] > 0
+            or info.get("lost", 0) > 0
+            or (
+                info["unacked"] > 0
+                and info.get("last_ack_recv", 0) > self._kernel_rtt(info) * 1000 + 40
+            )
+        ):
             if not self._loss_hold_deadline:
                 self._loss_hold_deadline = (
                     now + (info["rto"] + info["rtt"]) / 1_000_000.0
@@ -645,11 +656,17 @@ class Client:
             )
         except asyncio.TimeoutError:
             self._recovery_confirmations = 0
+            now = loop.time()
+            repeated_overdue = (
+                now - self._last_overdue_at <= self.LOSS_ISOLATION_SECONDS
+            )
+            self._last_overdue_at = now
             kind = self._network_stall(
                 tcp_at,
                 self._sample_tcp_info(),
-                loop.time() - ping_at,
+                now - ping_at,
                 self._lag_sample() - lag_at,
+                repeated_overdue,
             )
             if kind in ("loss", "loop"):
                 return
@@ -678,11 +695,16 @@ class Client:
             self._recovery_confirmations = 0
             kind = None
             if (now - sent_at) * offered_rate >= self.RECOVERY_UTILISATION:
+                repeated_overdue = (
+                    now - self._last_overdue_at <= self.LOSS_ISOLATION_SECONDS
+                )
+                self._last_overdue_at = now
                 kind = self._network_stall(
                     tcp_at,
                     self._sample_tcp_info(),
                     now - sent_at,
                     self._lag_sample() - lag_at,
+                    repeated_overdue,
                 )
             if kind in ("loss", "loop"):
                 return
@@ -803,13 +825,19 @@ class Client:
                     # Overdue: stop pushing, then keep waiting on this pong
                     # rather than issuing another ping behind it.
                     overdue = True
+                    now = loop.time()
+                    repeated_overdue = (
+                        now - self._last_overdue_at <= self.LOSS_ISOLATION_SECONDS
+                    )
+                    self._last_overdue_at = now
                     self._pong_overdue = True
                     self._recovery_confirmations = 0
                     network_stall = self._network_stall(
                         tcp_at,
                         self._sample_tcp_info(),
-                        loop.time() - ping_at,
+                        now - ping_at,
                         self._lag_sample() - lag_at,
+                        repeated_overdue,
                     )
                     self._net_stall = network_stall in ("loss", "loop")
                     self._queue_confirmations = 0
@@ -844,11 +872,14 @@ class Client:
                     self._queue_prompt(now)
                 self._drain_estimate(now)
                 if overdue:
+                    # Reuse this ping's isolation verdict, not its own timeout.
+                    self._last_overdue_at = now
                     network_stall = self._network_stall(
                         tcp_at,
                         self._sample_tcp_info(),
                         now - ping_at,
                         self._lag_sample() - lag_at,
+                        repeated_overdue,
                     )
                     self._net_stall = network_stall in ("loss", "loop")
                     self._queue_confirmations = 0
