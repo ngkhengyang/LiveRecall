@@ -148,7 +148,7 @@ def one_run(args, run_no, here):
             fresh_threshold_ms=args.fresh_threshold_ms,
         )
         print_summary(summary, args.fresh_threshold_ms)
-        json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        json_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         return summary
     finally:
         terminate_process(clients, "load_clients.py")

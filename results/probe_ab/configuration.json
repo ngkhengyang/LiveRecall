@@ -1,0 +1,67 @@
+{
+  "test_args": {
+    "t1": [
+      "--clients",
+      "20",
+      "--duration",
+      "20"
+    ],
+    "t2": [
+      "--clients",
+      "100",
+      "--duration",
+      "40"
+    ],
+    "t3": [
+      "--clients",
+      "100",
+      "--duration",
+      "60",
+      "--slow-percent",
+      "10",
+      "--slow-ms",
+      "500"
+    ],
+    "t4": [
+      "--clients",
+      "100",
+      "--duration",
+      "60",
+      "--disconnect-percent",
+      "20",
+      "--disconnect-at",
+      "15",
+      "--disconnect-seconds",
+      "5"
+    ],
+    "t5": [
+      "--clients",
+      "100",
+      "--duration",
+      "40"
+    ]
+  },
+  "runs": 3,
+  "port": 8811,
+  "outcomes": {
+    "t1": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t2": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t3": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t4": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t5": {
+      "skipped": true
+    }
+  }
+}
