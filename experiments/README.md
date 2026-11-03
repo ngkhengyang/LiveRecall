@@ -29,8 +29,7 @@ remaining arms and tests continue, and the harness ultimately exits nonzero.
 Progress lines and each completed test's median table appear live. At completion,
 the command prints all median tables, a ready-to-paste T3 Section 5 table, verdicts,
 and saved paths. `SUMMARY.md` and `summary.csv` include per-run values;
-`configuration.json` records the git commit, client hashes, Python and websockets
-versions, test arguments, timestamp, run count, port, and exit statuses.
+`configuration.json` records the test arguments, run count, port, and exit statuses.
 
 Custom runs and summary reprinting:
 

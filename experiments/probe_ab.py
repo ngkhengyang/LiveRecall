@@ -5,9 +5,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import datetime, timezone
-import hashlib
-from importlib import metadata
 import json
 import math
 from pathlib import Path
@@ -124,25 +121,11 @@ def build_variants(out):
 
 
 def write_configuration(out, args, tests):
-    """Save the code identity and invocation needed to reproduce this run."""
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True
-    )
+    """Save the test selection and run count that the summary needs."""
     config = {
-        "git_commit": commit.stdout.strip() if commit.returncode == 0 else None,
-        "client_sha256": {
-            arm: hashlib.sha256(
-                (out / arm / "submission_root/app/client.py").read_bytes()
-            ).hexdigest()
-            for arm in ARMS
-        },
-        "python": sys.version,
-        "python_executable": str(PYTHON),
-        "websockets": metadata.version("websockets"),
         "test_args": {test: TESTS[test] for test in tests},
         "runs": args.runs,
         "port": args.port,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
         "outcomes": {},
     }
     save_configuration(out, config)
