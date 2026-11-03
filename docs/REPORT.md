@@ -4,123 +4,134 @@ Team: TODO | Members: TODO | Implementation commit: TODO
 
 ## 1. Architecture and protocol
 
-LiveRecall distributes the supplied deterministic caption stream to student
-browsers over WebSockets. The Python asyncio server separates authoritative
-caption state from independent delivery to each receiver:
+LiveRecall distributes a changing caption stream from one source to many
+browsers over WebSockets. The backend server decides which revisions are valid and
+manages delivery separately for each receiver according to its backlog and
+connection progress.
 
 ```text
-caption_source.py --WebSocket--> Source --> Server --> CaptionStore
-                                             |        latest revisions
-                                    enqueue  |        shared final log
-                                             v              |
-                                  per-client buffer         | replay
-                                             |              v
-                                             +---------> sender --WS--> browser
+source --> Source --> Server --> CaptionStore (latest state + final log)
+                         |                    |
+                    accepted updates     replay finals
+                         v                    v
+                    Client: buffer + delivery cursor --> sender --> browser
 ```
 
-`submission_root/solution_server.py` preserves the required
-`python solution_server.py --port <port>` interface, defaulting to
-`0.0.0.0:8765`. Within `app/`, `server.py` coordinates connections and the shared
-store; `source.py` parses producer input; `caption_store.py` owns revision and
-history state; and `outbound_buffer.py` holds pending work. Each `Client` in
-`client.py` owns its sender, lag probe and replay cursor. `client/app.js` and
-`client/index.html` provide browser revision replacement, recall and reconnect.
+`CaptionStore` is the shared authority for revision acceptance and recent finals.
+Each `Client` owns an `OutboundBuffer`, one sender, a final-log cursor, and a
+probe task. Accepting and enqueueing an update never waits for a receiver's
+socket, so a blocked sender does not directly block delivery to other clients.
+Broadcast still requires work proportional to the number of clients.
 
-The first JSON message selects `SOURCE_HELLO` or `CLIENT_HELLO`; failure to
-provide a valid hello within five seconds closes the connection with code 1008.
-Only one source may be active. `protocol.py` requires positive integer segment
-and revision IDs, finite nonnegative `source_ts`, Boolean `final`, string `text`
-and a nonempty session. Updates must match the source's declared session.
-Malformed source updates and unknown message types are ignored; extra fields
-are tolerated. `SOURCE_DONE` is test control and is not forwarded.
-
-The store accepts updates before broadcast. Ingestion and enqueueing perform no
-socket waits; a blocked sender therefore does not directly stall other clients.
-Fan-out remains proportional to client count, while cached JSON avoids repeated
-serialization. The design assumes one lecture with increasing segment IDs and
-ordered completion. State survives source disconnection; a new lecture requires
-a server restart and browser reload because sessions share one store.
+`SOURCE_HELLO` and `CLIENT_HELLO` establish the connection role. Sources send
+`CAPTION_UPDATE` messages; receivers get `HISTORY` for initial recovery or connection followed
+by live `CAPTION_UPDATE` messages. Malformed source updates are ignored before
+state changes or broadcast, and `SOURCE_DONE` is not forwarded. Only one source
+is active at a time. The implementation assumes the supplied source's increasing
+segment and finalization order. State survives source disconnection in one shared
+namespace; starting a new lecture requires a server restart and browser reload.
 
 ## 2. Revision and recovery semantics
 
-`CaptionStore` retains the highest accepted revision per segment. Equal or
-lower revisions are rejected; revision numbers may skip. A final segment rejects
-every subsequent update, including higher revisions, so each final enters
-history once. The browser applies the same gate to live and recovered captions,
-replacing one row per segment and distinguishing provisional text from finals.
+**Revision replacement.** A segment is one caption whose text may change through
+several provisional revisions. While unfinished, it accepts only a higher
+revision; equal or lower revisions are duplicates or stale state. Once final,
+it rejects every further update, including higher revisions.
 
-Finals receive contiguous internal sequence numbers in a shared log retained
-for 90 seconds after server acceptance, measured with a monotonic clock. Expiry
-reclaims segment state; a retirement watermark rejects obsolete IDs. Unfinished
-state is capped at 4,000 segments. Memory therefore depends on caption rate and
-size within retention, rather than total lecture duration.
+Revision numbers may skip values. The browser applies this same gate to live
+and recovered captions, rewriting one row per segment and distinguishing drafts
+from finals visually. Repeated messages therefore cannot overwrite newer held
+state or append duplicate final rows.
 
-`CLIENT_HELLO` supplies the latest finalized `(last_segment, last_revision)` and
-a history window capped at 60 seconds; a late join uses `(0, 0)`. Recovery selects
-only finals newer than that tuple and inside the requested server-acceptance
-window, oldest first. Registration and history snapshot capture occur without
-an intervening `await`, recording the final-log tail at the subscription boundary.
-All `HISTORY` batches precede live delivery. Each targets at most 64 captions
-and 256 KiB including JSON framing; an oversized caption travels alone and must
-fit the peer's message limit. Empty context still produces one empty `HISTORY`.
+**Incremental recovery.** `CLIENT_HELLO` reports the latest finalized
+`(last_segment, last_revision)` already held by the browser. A provisional
+revision does not advance this marker: its final may still be missing. The
+server returns only finals beyond the marker and within the requested recent
+window, capped at 60 seconds. A late join uses `(0, 0)`. Ordering these finals
+by acceptance gives oldest-first recovery under the sequential source. This
+marker assumes ordered completion; it cannot represent holes below a later final.
 
-After successful history transmission, the sender starts at the captured tail.
-Arrivals during transmission enter live delivery; older unrequested finals are
-excluded even for a zero-second window. Existing unfinished captions are not
-snapshotted: a newcomer sees them on their next update. Connected replay can
-retrieve outstanding finals throughout the 90-second retention window. Its
-cursor advances after successful sends, without application acknowledgements;
-a reconnect creates a fresh delivery cursor from the requested recent context.
+Registration and snapshot capture happen without yielding, recording both the
+requested history and the current end of the final log. All `HISTORY` batches
+are sent before live delivery starts at that boundary. Finals accepted during
+history transmission lie after the boundary and remain owed. Batches target
+64 captions and 256 KiB; an oversized caption travels alone and must fit the
+peer's message limit. Existing unfinished captions are absent from the snapshot
+and appear only on their next update.
 
-The browser retains finals for 150 seconds by `source_ts`, with an independent
-80-row display limit and 400-segment unfinished-state cap. Local recall offers
-15/30/60 seconds, defaulting to 30, without network requests. Reconnect preserves
-in-memory state, retries from 500 ms with exponential backoff capped at five
-seconds, and requests 60 seconds after the finalized cursor. Reload becomes a
-late join. Timestamp-based recall requires aligned source and browser clocks.
+**Recovery limits and local recall.** Finals enter a shared log once, with
+internal sequence numbers marking delivery progress. They are retained for
+90 seconds after server acceptance and pruned during store operations. Connected
+replay can use that full window, whereas reconnect creates a fresh cursor after
+its requested context: older excluded finals are not replayed later. Retired
+segment IDs are rejected to prevent stale state returning after pruning. Server
+unfinished state is capped at 4,000 segments by retiring the lowest IDs.
+
+The browser preserves state across automatic reconnects and requests 60 seconds
+after its finalized marker; reloading instead becomes a late join. Its local
+15/30/60-second recall, defaulting to 30, filters already-held finals without a
+server request. On accepted updates it prunes finals older than 150 seconds and
+caps unfinished state at 400 segments. The 80-row live display limit does not
+limit recall storage.
 
 ## 3. Backpressure and overload policy
 
-Normal delivery preserves accepted revisions in FIFO order. Reaching 256 pending
-updates or exceeding the 4-MiB byte budget triggers compaction and replay on the
-same connection. Queued finals are then read from the shared log after the
-committed cursor; each unfinished segment retains only its latest revision,
-preserving its original queue age. A new final removes its queued provisional
-state. Final admission failures first attempt replay; active state must still
-fit within 4,000 entries and 4 MiB of pending JSON. One in-flight message and
-transport buffers are outside these limits.
+**Normal delivery preserves every accepted revision.** Each receiver has a FIFO,
+so a healthy browser sees drafts develop into their final text. Keeping every
+revision indefinitely when a receiver falls behind would instead accumulate
+obsolete text, memory use, and delivery delay. That receiver switches to replay
+on the same connection, while healthy receivers keep their own delivery policy.
 
 ```text
-NORMAL (every revision FIFO) --queue pressure or late probe--> REPLAY
-       ^                                          shared finals + latest drafts
-       +--no owed final/ready draft; lease expired-------------+
-Either mode --capacity / retention / terminal stall failure--> CLOSE (1013)
+NORMAL -- queue pressure / late probe --> REPLAY
+   ^                                       |
+   +--------- caught up; lease expired -----+
+capacity / retention / stall failure --> close affected receiver (1013)
 ```
 
-Replay sends individual `CAPTION_UPDATE` messages; `HISTORY` is reserved for
-hello recovery. After four consecutive finals, an eligible provisional update
-gets a turn. Provisional state becomes eligible after one second. This trades
-intermediate revision coverage for bounded queues and priority for finals.
+**Replay preserves useful state.** Reaching 256 pending updates or exceeding
+4 MiB triggers compaction and replay. Queued finals leave the local buffer and
+are read in order from the shared log after the receiver's committed cursor.
+Each unfinished segment keeps only its newest queued revision, preserving its
+original queue age; a final removes its queued draft. Thus pending drafts r1,
+r2, and r3 for one segment collapse to r3, and none remains queued once the
+final arrives. Intermediate drafts are sacrificed, while outstanding finals
+remain available within retention. Replay sends individual `CAPTION_UPDATE`
+messages; `HISTORY` is reserved for hello recovery.
 
-One probe runs at a time, with 250 ms between completed probes. Its deadline
-covers ping initiation and pong receipt, including blocked writes. A delay above
-`max(0.5 s, 6 × smoothed RTT)` immediately enters replay and starts a three-second
-catch-up lease, extended while the probe remains late. Failed returns to normal
-delivery double the lease up to 30 seconds; a sustained healthy trial resets it.
-RTT samples are capped at the lag threshold and smoothed with weight 0.25.
+Finals normally take priority. After at least four consecutive finals, a draft
+queued for one second gets a turn; eligible drafts can also be sent when no
+final remains. This grace period allows rapidly superseded drafts to disappear
+while giving longer-lived unfinished captions an opportunity to progress. The
+final cursor advances only after a successful send, so selecting a final does
+not prematurely mark it as sent.
 
-During the lease, each burst waits for a newly completed probe and sends up to
-64 updates or until bytes reach 256 KiB; one caption may cross the byte target.
-Queue-triggered replay alone does not impose this pacing. When no owed final
-or eligible provisional remains and the lease expires, FIFO delivery resumes.
-Pongs and successful sends indicate transport progress, without proving browser
-consumption; the library's separate heartbeat is disabled.
+**Lag controls pacing and return to normal.** One probe measures ping initiation
+and pong receipt, including blocked writes. A delay beyond
+`max(0.5 s, 6 × smoothed round-trip time)` activates replay and a three-second
+catch-up lease. This keeps delivery in replay even if the backlog drains, and
+is extended while the probe remains late. During the lease, each burst waits
+for a newly completed probe, then sends up to 64 updates or until bytes reach
+256 KiB; one caption may cross the byte target. Queue pressure alone activates
+replay without this pacing. Neither pongs nor successful sends prove browser
+acceptance or rendering.
 
-A send or complete probe stalled for 75 seconds, expired outstanding finals
-(`ReplayExpired`), or exhausted active capacity closes only that receiver with
-code 1013. Closing has a two-second deadline before transport abort. Disconnect
-cleanup cancels and joins sender/probe tasks. Finite retention cannot guarantee
-every final under sustained overload; reconnect recovers only requested context.
+When no outstanding final or eligible draft remains and the lease expires,
+coalescing stops and FIFO resumes, including any younger queued drafts. If lag
+returns soon after this normal trial, the next lease doubles, up to 30 seconds.
+After a sufficiently long normal trial, the next lag event resets it to three
+seconds. This discourages repeated overload but can delay restoration of full
+revision coverage after the receiver improves.
+
+**Finite capacity has an explicit failure policy.** Normal admission failure
+first attempts replay. Remaining unfinished work must fit within 4,000 entries
+and 4 MiB of pending JSON. Exceeding that capacity, losing an outstanding final
+to 90-second retention (`ReplayExpired`), or stalling an individual send or
+complete probe for 75 seconds initiates a 1013 close for that receiver. Closing
+gets two seconds before transport abort. Queue bounds exclude in-flight work,
+recovery snapshots, and transport buffers; shared-log memory depends on caption
+rate and size within retention. Sustained overload can therefore prevent final
+completeness, and reconnect restores only the requested recent context.
 
 ## 4. Public experiments and results
 
@@ -141,33 +152,79 @@ Use the supplied harness without changing its measurement logic. Run each requir
 ### 4.2 Measured results
 
 Caption Age is client receive time minus `source_ts`, excluding browser rendering;
-report its P50/P95/P99. Final completeness is correctly received unique finals /
-generated unique finals. Fresh Caption Ratio is the fraction of received updates
-within threshold T (public default: 500 ms); Fresh Final Caption Ratio uses generated
-finals as its denominator. Normal Update Coverage measures source revisions
-received during unconstrained operation. Recovery time runs from successful
-reconnect until all required recent recovery state has arrived.
+the public analyser computes its percentiles over accepted live updates. Final
+completeness counts correctly received unique finals, including recovered history,
+against expected finals across clients. The following table reproduces the
+supplied T1–T5 results summary. Matching per-run evidence and confirmation of the
+run count and median aggregation remain to be attached.
 
 | Test / client group | P50 age (ms) | P95 age (ms) | P99 age (ms) | Final completeness (%) |
 |---|---:|---:|---:|---:|
-| T1 | TODO | TODO | TODO | TODO |
-| T2 | TODO | TODO | TODO | TODO |
-| T3 normal | TODO | TODO | TODO | TODO |
-| T3 slow | TODO | TODO | TODO | TODO |
-| T4 | TODO | TODO | TODO | TODO |
-| T5 | TODO | TODO | TODO | TODO |
+| T1 | 3.88 | 6.78 | 8.95 | 100.00 |
+| T2 | 15.84 | 26.19 | 37.51 | 100.00 |
+| T3 overall | 15.56 | 2,303.55 | 7,874.86 | 99.41 |
+| T3 normal readers | 15.31 | 25.29 | 38.77 | 100.00 |
+| T3 slow readers | 6,316.66 | 8,573.00 | 8,879.90 | 94.08 |
+| T4 | 13.02 | 24.41 | 33.92 | 100.00 |
+| T5 | 261.29 | 677.31 | 825.90 | 99.98 |
+
+Fresh Caption Ratio is the fraction of accepted live updates within threshold T
+(public default: 500 ms). Fresh Final Caption Ratio counts unique finals received
+within T against generated finals, including finals recovered through history.
+Normal Update Coverage measures source revisions received during unconstrained
+operation. These ratios cannot be reconstructed from three age percentiles and
+completeness alone; their values remain to be obtained from the matching runs.
 
 | Test / client group | Fresh Caption Ratio (%) | Fresh Final Caption Ratio (%) | Normal Update Coverage (%) |
 |---|---:|---:|---:|
 | T1 | TODO | TODO | TODO |
 | T2 | TODO | TODO | TODO |
-| T3 normal | TODO | TODO | TODO |
-| T3 slow | TODO | TODO | TODO |
+| T3 overall | TODO | TODO | TODO |
+| T3 normal readers | TODO | TODO | TODO |
+| T3 slow readers | TODO | TODO | TODO |
 | T4 | TODO | TODO | TODO |
 | T5 | TODO | TODO | TODO |
 
+TODO: Add T4 recovery time, measured from successful reconnect until the required
+recent recovery state is received, plus duplicate/stale counts and resource-use
+evidence. Record the harness's HISTORY-response timing separately if it does not
+measure arrival of the complete recovery state.
 
-TODO: Interpret the results: correctness under T1, scaling under T2, normal-versus-slow isolation under T3, recovery under T4, and TCP retransmission/head-of-line effects on tail latency under T5. Explain unexpected observations and any failed runs.
+### 4.3 Interpretation
+
+**T1–T2: normal delivery and scale.** T1 achieves 100% final completeness with
+P99 age of 8.95 ms. At the required 100-client scale in T2, P99 increases to
+37.51 ms while completeness remains 100%. This supports timely final delivery
+under the tested normal workload. Full provisional revision coverage and absence
+of duplicate/stale updates still require their corresponding counters.
+
+**T3: isolation succeeds, but slow-reader delivery remains limited.** Normal
+readers retain 100% completeness, with P95/P99 ages of 25.29/38.77 ms, close to
+T2's 26.19/37.51 ms. This supports isolation from slow receivers. Slow readers,
+however, have median age of 6.32 seconds, P95 age of 8.57 seconds, and only
+94.08% final completeness. The overall 99.41% completeness hides this group-level
+shortfall. Coalescing can reduce obsolete draft traffic, but 5.92% of expected
+finals remain unaccounted for in the slow-reader measurement. These results do
+not establish timely or complete catch-up for that group. Per-client logs are
+needed to distinguish finals still delayed at the measurement deadline from
+other delivery failures.
+
+**T4: final completeness survives temporary disconnection.** The reconnect
+scenario reports 100% final completeness and P99 live-update age of 33.92 ms.
+This supports recovery of missed finals within the tested run. The live-update
+percentiles exclude recovered history, so 33.92 ms is not a recovery-time
+measurement. Recovery timing and duplicate/stale counters are still needed to
+assess how quickly and cleanly clients converge after reconnecting.
+
+**T5: impairment increases delay and exposes a small completeness shortfall.**
+P50 rises to 261.29 ms and P95/P99 to 677.31/825.90 ms, exceeding the 500-ms
+freshness threshold in the tail. This is consistent with added network delay
+and jitter, together with TCP retransmission and ordered delivery delaying later
+data after packet loss. The summary cannot separate these contributions.
+Completeness is 99.98%, leaving a 0.02-percentage-point shortfall to investigate
+using the matching logs and observation deadline. Exact impairment settings and
+freshness ratios are required to make the result reproducible and quantify its
+effect on useful caption delivery.
 
 ## 5. Before/after optimization comparison
 
@@ -183,11 +240,37 @@ TODO: Explain the mechanism behind the measured difference and its cost. Quantif
 
 ## 6. Discussion, limitations and future work
 
-TODO: Discuss failures and engineering trade-offs, including any tuning that did not help. Relate claims to the measurements and distinguish observed behavior from untested expectations.
+**Failures and trade-offs.** T3 normal readers achieve 100% final completeness
+and 25.29-ms P95 age, while slow readers reach only 94.08% completeness and
+8.57-second P95 age. Isolation therefore succeeds under this workload, but
+slow-reader delivery remains delayed and incomplete. T5 also exceeds the
+500-ms freshness threshold at P95 and falls slightly short of complete final
+delivery. Coalescing reduces obsolete draft traffic at the cost of intermediate
+revision coverage. Longer catch-up leases discourage repeated overload but can
+postpone the return to full revisions after a receiver improves. Burst pacing
+and lease timing are possible contributors to delay; matching traces are needed
+to establish why finals remained unreceived at the measurement deadline.
 
-TODO: State known limits: recovery horizon, sustained overload, tested population/workloads, environment differences, and any incomplete application behavior. Do not claim hidden-workload performance from public tests alone.
+**Limitations.** Lag detection measures transport responsiveness without
+measuring the receiver's caption-processing rate. Healthy pongs can therefore
+coexist with an application backlog, and fixed bursts may supply updates faster
+than the receiver consumes them. Coalescing affects only the server's pending
+buffer: obsolete drafts already handed to socket or receiver buffers cannot be
+withdrawn and can delay newer finals. Recovery after a bottleneck consequently
+depends on how much data was sent before replay began. Memory use also remains
+workload-dependent: the shared final log has an age limit but no byte cap, so
+caption bursts or large texts can increase memory consumption despite the
+per-client queue limits.
 
-TODO: Give a short, concrete future-work/FYP direction and explain how it builds on the results.
+**Future work.** Our objective is 100% final completeness in T3 and a faster
+return to full revision delivery after a temporary slowdown, within the existing
+queue bounds. We will first trace unreceived finals, then compare burst limits
+and catch-up lease policies in repeated, matched T3 and slowdown/recovery tests.
+Completeness and caption age will be compared at the same observation deadline.
+After restoring normal reading speed, we will measure the time until all newly
+generated revisions are received consistently. Normal-client latency, peak queue
+usage, and process memory will be monitored to check that improved slow-client
+delivery preserves isolation and bounded resource use.
 
 ## References
 
