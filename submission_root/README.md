@@ -11,7 +11,7 @@ Local speech recognition is an optional input source.
 |---|---|---|
 | David Goh Zhe Kai | A0192324J | Test environment, experiments, integration, and results analysis |
 | Qin Haichen | A0214409L | Server-to-client delivery, backpressure, and slow-client isolation |
-| Ng Kheng Yang | Pending | Browser behavior, reconnect recovery, and interaction diagrams |
+| Ng Kheng Yang | A0277167R | Browser behavior, reconnect recovery, and interaction diagrams |
 | Wang Yanxiang | A0281803H | Server/source coordination, protocol documentation, and optional ASR |
 
 See [the contribution record](CONTRIBUTIONS.md) for the agreed work split.
@@ -33,7 +33,7 @@ directories; they are not included in a standalone `submission_root/` copy.
 
 ## Ubuntu setup
 
-Use **Python 3.10 or newer**; the recorded Ubuntu experiments used Python 3.12.3.
+Experiments used Ubuntu version 26.04.1 on virtual box and Python 3.12.3. Use **Python 3.10 or newer**
 
 ```bash
 sudo apt update
@@ -190,38 +190,6 @@ This checks required files and the server's WebSocket startup; it does not
 validate revision semantics, recovery correctness, or performance thresholds.
 Exclude virtual environments, cached models, and generated `output/` files
 from the submission package.
-
-## Saved test results
-
-[Updated T1-T5 results](../results/TEST_RESULTS_20261104.md) combine the fresh
-Ubuntu T1-T4 rerun with the earlier same-day T5 evidence, committed in `6532b76`.
-Both sets ran on Ubuntu 24.04.5 LTS ARM64, two vCPUs, approximately 4 GiB RAM,
-Python 3.12.3 and websockets 16.1.1. Application and public-test hashes match
-implementation `81608f5`. Each configuration has three independent runs.
-
-- [T1-T4 comparison and raw evidence](../results/probe_ab_t1_t4_ubuntu_20261104/SUMMARY.md).
-- [Reused T5 comparison and netem evidence](../results/probe_ab_t5_ubuntu_20261104/SUMMARY.md).
-
-Report Section 4 uses **with-probe** results only. Section 5 compares **with
-and without probes** on T3 and T5. The following values are with-probe medians.
-
-| Test | P95 caption age (ms) | P99 caption age (ms) | Final completeness (%) |
-|---|---:|---:|---:|
-| T1 | 6.57 | 8.29 | 100.00 |
-| T2 | 21.87 | 28.60 | 91.84 |
-| T3 | 2,787.66 | 8,241.15 | 90.13 |
-| T4 | 19.53 | 25.05 | 89.47 |
-| T5 (reused) | 702.30 | 1,057.88 | 100.00 |
-
-Source completion was observed at 65.95-68.70 s after client start in ten T3/T4
-runs, beyond their 60-s windows. SOURCE_DONE follows the final segment gap and
-socket close; exact final-emission times were not captured. Universally absent
-terminal finals may have been generated after clients stopped, while the
-analyser still counts them. The public measurement logic was unchanged. A
-separate slow-reader backlog is also visible: in T3 run 3, slow readers missed
-finals 67-69 that normal readers received. These results are not a full pass
-of final-delivery correctness. See the combined note for timing, recovery and
-resource-measurement limits and the command-exit discrepancy.
 
 To reproduce the T1-T4 probe comparison using the environment above:
 
