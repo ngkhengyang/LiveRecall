@@ -12,7 +12,6 @@ Local speech recognition is an optional input source.
 | David Goh Zhe Kai | A0192324J | Test environment, experiments, integration, and results analysis |
 | Qin Haichen | A0214409L | Server-to-client delivery, backpressure, and slow-client isolation |
 | Ng Kheng Yang | A0277167R | Browser behavior, reconnect recovery, and interaction diagrams |
-| Ng Kheng Yang | A0277167R | Browser behavior, reconnect recovery, and interaction diagrams |
 | Wang Yanxiang | A0281803H | Server/source coordination, protocol documentation, and optional ASR |
 
 See [the contribution record](CONTRIBUTIONS.md) for the agreed work split.
