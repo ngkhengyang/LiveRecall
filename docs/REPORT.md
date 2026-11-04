@@ -1,6 +1,6 @@
 # LiveRecall Technical Report
 
-Team: TODO | Members: TODO | Implementation commit: TODO
+Members: David Goh, Ng Kheng Yang, Isabel Wang, Qin Haichen
 
 ## 1. Architecture and protocol
 
@@ -52,7 +52,7 @@ by acceptance gives oldest-first recovery under the sequential source. This
 marker assumes ordered completion; it cannot represent holes below a later final.
 
 Registration and snapshot capture happen without yielding, recording both the
-requested history and the current end of the final log. All `HISTORY` batches
+requested history and the current end of the final log. `HISTORY` message is broken down into batches to avoid exceeding the websocket message size limit, all `HISTORY` batches
 are sent before live delivery starts at that boundary. Finals accepted during
 history transmission lie after the boundary and remain owed. Batches target
 64 captions and 256 KiB; an oversized caption travels alone and must fit the
@@ -60,16 +60,14 @@ peer's message limit. Existing unfinished captions are absent from the snapshot
 and appear only on their next update.
 
 **Recovery limits and local recall.** Finals enter a shared log once, with
-internal sequence numbers marking delivery progress. They are retained for
-90 seconds after server acceptance and pruned during store operations. Connected
-replay can use that full window, whereas reconnect creates a fresh cursor after
+internal sequence numbers marking delivery progress for each client using an internal cursor recording the last delivered final message. They are retained for
+90 seconds after server acceptance and pruned during store operations. Connected clients under
+replay mode can use that full window for consuming final messages in the shared log based on their cursor position, whereas reconnect creates a fresh cursor after
 its requested context: older excluded finals are not replayed later. Retired
 segment IDs are rejected to prevent stale state returning after pruning. Server
 unfinished state is capped at 4,000 segments by retiring the lowest IDs.
 
-The browser preserves state across automatic reconnects and requests 60 seconds
-after its finalized marker; reloading instead becomes a late join. Its local
-15/30/60-second recall, defaulting to 30, filters already-held finals without a
+During an automatic reconnect, the browser keeps its in-memory caption state and sends its latest finalized position with a request for up to 60 seconds of recent history. The server returns finalized captions in that window that are newer than the position; reloading instead becomes a late join. Its local 15/30/60-second recall, defaulting to 30, filters already-held finals without a
 server request. On accepted updates it prunes finals older than 150 seconds and
 caps unfinished state at 400 segments. The 80-row live display limit does not
 limit recall storage.
@@ -79,7 +77,7 @@ limit recall storage.
 **Normal delivery preserves every accepted revision.** Each receiver has a FIFO,
 so a healthy browser sees drafts develop into their final text. Keeping every
 revision indefinitely when a receiver falls behind would instead accumulate
-obsolete text, memory use, and delivery delay. That receiver switches to replay
+obsolete text, memory use, and delivery delay. That slow receiver switches to replay mode
 on the same connection, while healthy receivers keep their own delivery policy.
 
 ```text
@@ -91,7 +89,7 @@ capacity / retention / stall failure --> close affected receiver (1013)
 
 **Replay preserves useful state.** Reaching 256 pending updates or exceeding
 4 MiB triggers compaction and replay. Queued finals leave the local buffer and
-are read in order from the shared log after the receiver's committed cursor.
+are read in order from the shared log after the receiver's cursor.
 Each unfinished segment keeps only its newest queued revision, preserving its
 original queue age; a final removes its queued draft. Thus pending drafts r1,
 r2, and r3 for one segment collapse to r3, and none remains queued once the
@@ -103,25 +101,13 @@ Finals normally take priority. After at least four consecutive finals, a draft
 queued for one second gets a turn; eligible drafts can also be sent when no
 final remains. This grace period allows rapidly superseded drafts to disappear
 while giving longer-lived unfinished captions an opportunity to progress. The
-final cursor advances only after a successful send, so selecting a final does
-not prematurely mark it as sent.
+final cursor advances only after a successful send.
 
-**Lag controls pacing and return to normal.** One probe measures ping initiation
-and pong receipt, including blocked writes. A delay beyond
-`max(0.5 s, 6 × smoothed round-trip time)` activates replay and a three-second
-catch-up lease. This keeps delivery in replay even if the backlog drains, and
-is extended while the probe remains late. During the lease, each burst waits
-for a newly completed probe, then sends up to 64 updates or until bytes reach
-256 KiB; one caption may cross the byte target. Queue pressure alone activates
-replay without this pacing. Neither pongs nor successful sends prove browser
-acceptance or rendering.
+**Lag controls pacing and return to normal.** Each client has one ping probe. Its measured time runs from ping initiation to pong receipt, so a blocked write can make the probe late. If the delay exceeds max(0.5 s, 6 × smoothed round-trip time), the client enters replay mode and starts a three-second catch-up lease. While the pong is overdue, the lease is repeatedly extended. This keeps the client in replay even if its backlog briefly drains.
 
-When no outstanding final or eligible draft remains and the lease expires,
-coalescing stops and FIFO resumes, including any younger queued drafts. If lag
-returns soon after this normal trial, the next lease doubles, up to 30 seconds.
-After a sufficiently long normal trial, the next lag event resets it to three
-seconds. This discourages repeated overload but can delay restoration of full
-revision coverage after the receiver improves.
+During lag-driven replay, the sender sends bursts of up to 64 updates or 256 KiB, then waits for a probe completed after that burst before sending another. A single caption may take a burst past the byte target. Queue pressure can also trigger replay, but pressure alone does not enable probe pacing. A pong or successful socket write shows transport progress; it does not show that the browser accepted or rendered the caption.
+
+After the pong arrives, replay continues until the lease has expired and no replay final or eligible provisional update remains. The client then stops coalescing and resumes FIFO delivery, including any queued drafts that were not yet eligible during replay. If lag returns before the normal-mode probation period ends, the next lease doubles, up to 30 seconds. If the client remains in normal mode through probation, the next lease resets to three seconds.
 
 **Finite capacity has an explicit failure policy.** Normal admission failure
 first attempts replay. Remaining unfinished work must fit within 4,000 entries
