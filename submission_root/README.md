@@ -1,18 +1,44 @@
-# LiveRecall
+# Group 6 - LiveRecall
 
 LiveRecall distributes revision-based captions over WebSockets to browser
 clients, with local 15/30/60-second recall and automatic reconnect/recovery.
 The mandatory application uses the supplied deterministic caption source.
 Local speech recognition is an optional input source.
 
+## Team members
+
+| Member | Student ID | Main responsibility |
+|---|---|---|
+| David Goh Zhe Kai | A0192324J | Test environment, experiments, integration, and results analysis |
+| Qin Haichen | A0214409L | Server-to-client delivery, backpressure, and slow-client isolation |
+| Ng Kheng Yang | Pending | Browser behavior, reconnect recovery, and interaction diagrams |
+| Wang Yanxiang | A0281803H | Server/source coordination, protocol documentation, and optional ASR |
+
+See [the contribution record](CONTRIBUTIONS.md) for the agreed work split.
+
+## Repository layout
+
+- `submission_root/`: required server entry point, `app/` implementation,
+  browser client, and submission documents.
+- `test/` and `network_profiles/`: public deterministic harness and Ubuntu
+  network impairment scripts.
+- `experiments/` and `results/`: probe comparison runner and saved evidence.
+- `bonus_asr/`: optional local speech-recognition adapter.
+- `docs/`: report source and supporting guides.
+
 Run the commands below from the **repository root**, the directory containing
 `submission_root/`, `test/`, and `bonus_asr/`, unless stated otherwise.
+The test, experiment, ASR, and documentation paths require those sibling
+directories; they are not included in a standalone `submission_root/` copy.
 
 ## Ubuntu setup
+
+Use **Python 3.10 or newer**; the recorded Ubuntu experiments used Python 3.12.3.
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip iproute2
+python3 -c 'import sys; assert sys.version_info >= (3, 10), "LiveRecall requires Python 3.10+"'
 python3 -m venv .venv
 .venv/bin/python -m pip install -r submission_root/requirements.txt
 ```
@@ -50,11 +76,60 @@ python solution_server.py --port 8765
 
 Return to the repository root before following the remaining sections.
 
+If you received only the submission directory, run these commands from inside
+it instead. Serve `client/` in a second terminal using the same environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python solution_server.py --port 8765
+# Second terminal, also inside the submission directory:
+.venv/bin/python -m http.server 8000 --directory client
+```
+
+For browsers outside the server's machine or VM, replace `127.0.0.1` with its
+reachable IP address in both the HTTP URL and the `?ws=` override.
+
+## Design notes
+
+- **Revision state:** the server and browser keep the latest revision per
+  segment, reject duplicate or older revisions, and never replace a final.
+  The browser updates one row per segment.
+- **Bounded history:** the shared final log retains 90 seconds of accepted
+  finals; reconnect and late-join requests return at most 60 seconds of recent
+  finals. Unfinished server state is capped at 4,000 segments. History memory
+  depends on source rate and caption size within the retention window.
+- **Recovery:** the browser resumes after its latest finalized
+  `(segment, revision)` marker. The server captures context and a log boundary
+  together, sends the context first, then delivers subsequent updates. This
+  assumes increasing segment IDs and ordered finalization, as in the supplied
+  source. Existing unfinished captions are absent from the recovery snapshot.
+
 Reconnect and late-join context arrives as ordered `HISTORY` messages, targeting
 at most 64 captions and 256 KiB of complete JSON per message. All snapshot
 messages precede live updates. Empty context still receives one empty `HISTORY`.
 A caption larger than the byte target travels alone without truncation and must
 still fit the receiving client's message-size limit.
+
+- **Backpressure:** each receiver has an independent sender and FIFO. Queue
+  pressure (256 pending updates or the 4 MiB byte limit) or a late ping/pong
+  probe switches that receiver to shared-log final replay and keeps only the
+  latest queued draft per unfinished segment. Probe-driven catch-up uses paced
+  bursts; healthy receivers retain normal revision delivery. Live replay uses
+  individual `CAPTION_UPDATE` messages.
+- **Overload trade-off:** intermediate drafts may be skipped during catch-up.
+  Remaining drafts must fit 4,000 entries and 4 MiB of pending JSON. Capacity
+  failure, expired outstanding finals, or a 75-second send/probe stall closes
+  that receiver with code 1013. These bounds exclude transport buffers and
+  recovery snapshots. Reconnecting recovers only the requested recent window,
+  so sustained overload does not guarantee complete delivery.
+- **Local recall:** the browser's 15/30/60-second view reads locally held
+  finals, with a 30-second default. Final state is pruned at 150 seconds on
+  accepted updates; unfinished browser state is capped at 400 segments.
+
+Use one source/session at a time. Restart the server and reload browser tabs
+before starting a new lecture or restarting segment numbering; source
+disconnection does not clear retained state.
 
 ## Mandatory deterministic application demo
 
@@ -89,13 +164,32 @@ For T5, apply the supplied network profile, run the experiment, and reset the
 profile afterwards even if the experiment fails:
 
 ```bash
-sudo bash network_profiles/delay_loss.sh lo
-.venv/bin/python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem output/t5
-sudo bash network_profiles/reset.sh lo
+(
+  set -e
+  trap 'sudo bash network_profiles/reset.sh lo' EXIT
+  sudo bash network_profiles/delay_loss.sh lo
+  .venv/bin/python test/run_demo.py --clients 100 --duration 40 --runs 3 --output-stem output/t5
+)
 ```
 
 See [the public-test guide](../docs/PUBLIC_TESTS.md) for metrics and the required
 before/after comparison. Recorded runs are linked below.
+
+## Final submission check
+
+The final checker requires `README.md`, `AI_USAGE.md`, `CONTRIBUTIONS.md`, and
+`report.pdf` inside `submission_root/`, alongside the server, `app/`, requirements,
+and browser files. Fill in Ng Kheng Yang's pending student ID in the team
+details before submission.
+
+```bash
+.venv/bin/python test/submission_check.py --final
+```
+
+This checks required files and the server's WebSocket startup; it does not
+validate revision semantics, recovery correctness, or performance thresholds.
+Exclude virtual environments, cached models, and generated `output/` files
+from the submission package.
 
 ## Saved test results
 
