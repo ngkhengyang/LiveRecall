@@ -1,0 +1,90 @@
+
+=== Run 1/3 ===
+Clients=100, duration=40.0s, source segments=49
+Starting 100 clients; slow=0, disconnecting=0, late=0
+Results written to /home/ubuntu/refresh-t1-t4-20261104-QJHbVh/output/probe_ab_t1_t4_ubuntu_20261104/with_probe/output/t2_run01.csv
+SOURCE_DONE: emitted 49 finalized segments
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         13400
+Recovered history items:       0
+Accepted messages:             13400
+Recovered messages:            0
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               14.12 ms
+P95 caption age:               21.94 ms
+P99 caption age:               28.60 ms
+Fresh Caption Ratio (<=500 ms): 100.00%
+Fresh Final Caption Ratio (<=500 ms): 89.80%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         4400/4900
+Final-caption completeness:    89.80%
+Unique live revisions:         13400/14700
+Normal Update Coverage:        91.16%
+
+=== Run 2/3 ===
+Clients=100, duration=40.0s, source segments=49
+Starting 100 clients; slow=0, disconnecting=0, late=0
+Results written to /home/ubuntu/refresh-t1-t4-20261104-QJHbVh/output/probe_ab_t1_t4_ubuntu_20261104/with_probe/output/t2_run02.csv
+SOURCE_DONE: emitted 49 finalized segments
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         13500
+Recovered history items:       0
+Accepted messages:             13500
+Recovered messages:            0
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               13.83 ms
+P95 caption age:               21.38 ms
+P99 caption age:               24.52 ms
+Fresh Caption Ratio (<=500 ms): 100.00%
+Fresh Final Caption Ratio (<=500 ms): 91.84%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         4500/4900
+Final-caption completeness:    91.84%
+Unique live revisions:         13500/14700
+Normal Update Coverage:        91.84%
+
+=== Run 3/3 ===
+Clients=100, duration=40.0s, source segments=49
+Starting 100 clients; slow=0, disconnecting=0, late=0
+Results written to /home/ubuntu/refresh-t1-t4-20261104-QJHbVh/output/probe_ab_t1_t4_ubuntu_20261104/with_probe/output/t2_run03.csv
+SOURCE_DONE: emitted 49 finalized segments
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         13600
+Recovered history items:       0
+Accepted messages:             13600
+Recovered messages:            0
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               13.84 ms
+P95 caption age:               21.87 ms
+P99 caption age:               34.13 ms
+Fresh Caption Ratio (<=500 ms): 100.00%
+Fresh Final Caption Ratio (<=500 ms): 91.84%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         4500/4900
+Final-caption completeness:    91.84%
+Unique live revisions:         13600/14700
+Normal Update Coverage:        92.52%
+
+=== Median across independent runs ===
+P50 caption age                    13.84 ms
+P95 caption age                    21.87 ms
+P99 caption age                    28.60 ms
+Fresh Caption Ratio               100.00 %
+Fresh Final Caption Ratio          91.84 %
+Final completeness                 91.84 %
+Normal Update Coverage             91.84 %
+Normal-client P95                  21.87 ms
+
+Public run complete. CSV and JSON result files were written in output/.

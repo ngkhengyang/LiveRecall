@@ -1,0 +1,106 @@
+
+=== Run 1/3 ===
+Clients=100, duration=60.0s, source segments=76
+Starting 100 clients; slow=10, disconnecting=0, late=0
+SOURCE_DONE: emitted 76 finalized segments
+Results written to /home/ubuntu/refresh-t1-t4-20261104-QJHbVh/output/probe_ab_t1_t4_ubuntu_20261104/no_probe/output/t3_run01.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         19100
+Recovered history items:       0
+Accepted messages:             19100
+Recovered messages:            0
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               11.69 ms
+P95 caption age:               3506.85 ms
+P99 caption age:               21756.43 ms
+Fresh Caption Ratio (<=500 ms): 94.35%
+Fresh Final Caption Ratio (<=500 ms): 78.16%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         6300/7600
+Final-caption completeness:    82.89%
+Unique live revisions:         19100/22800
+Normal Update Coverage:        83.77%
+
+Slow-reader isolation
+---------------------
+Normal clients: P50=11.41 ms, P95=16.31 ms, Fresh=100.00% (18000 msgs)
+Slow clients:   P50=13291.67 ms, P95=25125.46 ms, Fresh=1.82% (1100 msgs)
+
+=== Run 2/3 ===
+Clients=100, duration=60.0s, source segments=76
+Starting 100 clients; slow=10, disconnecting=0, late=0
+SOURCE_DONE: emitted 76 finalized segments
+Results written to /home/ubuntu/refresh-t1-t4-20261104-QJHbVh/output/probe_ab_t1_t4_ubuntu_20261104/no_probe/output/t3_run02.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         19030
+Recovered history items:       0
+Accepted messages:             19030
+Recovered messages:            0
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               11.72 ms
+P95 caption age:               3590.80 ms
+P99 caption age:               21644.60 ms
+Fresh Caption Ratio (<=500 ms): 94.22%
+Fresh Final Caption Ratio (<=500 ms): 78.16%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         6310/7600
+Final-caption completeness:    83.03%
+Unique live revisions:         19030/22800
+Normal Update Coverage:        83.46%
+
+Slow-reader isolation
+---------------------
+Normal clients: P50=11.43 ms, P95=16.21 ms, Fresh=100.00% (17910 msgs)
+Slow clients:   P50=12932.01 ms, P95=24919.67 ms, Fresh=1.79% (1120 msgs)
+
+=== Run 3/3 ===
+Clients=100, duration=60.0s, source segments=76
+Starting 100 clients; slow=10, disconnecting=0, late=0
+SOURCE_DONE: emitted 76 finalized segments
+Results written to /home/ubuntu/refresh-t1-t4-20261104-QJHbVh/output/probe_ab_t1_t4_ubuntu_20261104/no_probe/output/t3_run03.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         19210
+Recovered history items:       0
+Accepted messages:             19210
+Recovered messages:            0
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               11.50 ms
+P95 caption age:               3423.99 ms
+P99 caption age:               21374.76 ms
+Fresh Caption Ratio (<=500 ms): 94.27%
+Fresh Final Caption Ratio (<=500 ms): 79.34%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         6400/7600
+Final-caption completeness:    84.21%
+Unique live revisions:         19210/22800
+Normal Update Coverage:        84.25%
+
+Slow-reader isolation
+---------------------
+Normal clients: P50=11.21 ms, P95=16.38 ms, Fresh=100.00% (18090 msgs)
+Slow clients:   P50=12789.31 ms, P95=24824.26 ms, Fresh=1.79% (1120 msgs)
+
+=== Median across independent runs ===
+P50 caption age                    11.69 ms
+P95 caption age                  3506.85 ms
+P99 caption age                 21644.60 ms
+Fresh Caption Ratio                94.27 %
+Fresh Final Caption Ratio          78.16 %
+Final completeness                 83.03 %
+Normal Update Coverage             83.77 %
+Normal-client P95                  16.31 ms
+Slow-client P95                 24919.67 ms
+
+Public run complete. CSV and JSON result files were written in output/.

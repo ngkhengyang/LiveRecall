@@ -1,0 +1,197 @@
+{
+  "started_utc": "2026-11-04T03:16:59.217440+00:00",
+  "poll_interval_seconds": 0.25,
+  "method": "Read existing unbuffered test logs without modifying or instrumenting the public test processes. Each event timestamp is the time its complete line was first observed. Polling and scheduling add observation delay; existing lines at observer startup are excluded. A source-done line is printed after the final segment gap and source WebSocket closure, not at final-caption emission.",
+  "events": [
+    {
+      "test": "t3",
+      "arm": "with_probe",
+      "run": 2,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:17:52.299778+00:00",
+      "observed_monotonic_seconds": 4359.966762339,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t3",
+      "arm": "with_probe",
+      "run": 3,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:17:53.146371+00:00",
+      "observed_monotonic_seconds": 4360.813363075,
+      "line": "Starting 100 clients; slow=10, disconnecting=0, late=0"
+    },
+    {
+      "test": "t3",
+      "arm": "with_probe",
+      "run": 3,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:18:59.099804+00:00",
+      "observed_monotonic_seconds": 4426.766819486,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t3",
+      "arm": "no_probe",
+      "run": 1,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:18:59.868415+00:00",
+      "observed_monotonic_seconds": 4427.535403411,
+      "line": "Starting 100 clients; slow=10, disconnecting=0, late=0"
+    },
+    {
+      "test": "t3",
+      "arm": "no_probe",
+      "run": 1,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:20:08.383240+00:00",
+      "observed_monotonic_seconds": 4496.050249624,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t3",
+      "arm": "no_probe",
+      "run": 2,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:20:10.697710+00:00",
+      "observed_monotonic_seconds": 4498.364695421,
+      "line": "Starting 100 clients; slow=10, disconnecting=0, late=0"
+    },
+    {
+      "test": "t3",
+      "arm": "no_probe",
+      "run": 2,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:21:19.391810+00:00",
+      "observed_monotonic_seconds": 4567.058794159,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t3",
+      "arm": "no_probe",
+      "run": 3,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:21:21.686183+00:00",
+      "observed_monotonic_seconds": 4569.353165736,
+      "line": "Starting 100 clients; slow=10, disconnecting=0, late=0"
+    },
+    {
+      "test": "t3",
+      "arm": "no_probe",
+      "run": 3,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:22:30.389531+00:00",
+      "observed_monotonic_seconds": 4638.056563907,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t4",
+      "arm": "with_probe",
+      "run": 1,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:22:32.591198+00:00",
+      "observed_monotonic_seconds": 4640.258178865,
+      "line": "Starting 100 clients; slow=0, disconnecting=20, late=0"
+    },
+    {
+      "test": "t4",
+      "arm": "with_probe",
+      "run": 1,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:23:39.807289+00:00",
+      "observed_monotonic_seconds": 4707.47427908,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t4",
+      "arm": "with_probe",
+      "run": 2,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:23:40.349578+00:00",
+      "observed_monotonic_seconds": 4708.016566481,
+      "line": "Starting 100 clients; slow=0, disconnecting=20, late=0"
+    },
+    {
+      "test": "t4",
+      "arm": "with_probe",
+      "run": 2,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:24:47.500277+00:00",
+      "observed_monotonic_seconds": 4775.167265703,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t4",
+      "arm": "with_probe",
+      "run": 3,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:24:48.319324+00:00",
+      "observed_monotonic_seconds": 4775.986319099,
+      "line": "Starting 100 clients; slow=0, disconnecting=20, late=0"
+    },
+    {
+      "test": "t4",
+      "arm": "with_probe",
+      "run": 3,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:25:55.323994+00:00",
+      "observed_monotonic_seconds": 4842.991034598,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t4",
+      "arm": "no_probe",
+      "run": 1,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:25:56.101103+00:00",
+      "observed_monotonic_seconds": 4843.768087334,
+      "line": "Starting 100 clients; slow=0, disconnecting=20, late=0"
+    },
+    {
+      "test": "t4",
+      "arm": "no_probe",
+      "run": 1,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:27:04.692743+00:00",
+      "observed_monotonic_seconds": 4912.359727389,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t4",
+      "arm": "no_probe",
+      "run": 2,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:27:05.216184+00:00",
+      "observed_monotonic_seconds": 4912.883170437,
+      "line": "Starting 100 clients; slow=0, disconnecting=20, late=0"
+    },
+    {
+      "test": "t4",
+      "arm": "no_probe",
+      "run": 2,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:28:13.735224+00:00",
+      "observed_monotonic_seconds": 4981.402242905,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    },
+    {
+      "test": "t4",
+      "arm": "no_probe",
+      "run": 3,
+      "event": "clients_started",
+      "observed_utc": "2026-11-04T03:28:14.501811+00:00",
+      "observed_monotonic_seconds": 4982.168832227,
+      "line": "Starting 100 clients; slow=0, disconnecting=20, late=0"
+    },
+    {
+      "test": "t4",
+      "arm": "no_probe",
+      "run": 3,
+      "event": "source_done",
+      "observed_utc": "2026-11-04T03:29:22.242960+00:00",
+      "observed_monotonic_seconds": 5049.909949564,
+      "line": "SOURCE_DONE: emitted 76 finalized segments"
+    }
+  ],
+  "finished_utc": "2026-11-04T03:29:22.498392+00:00"
+}
