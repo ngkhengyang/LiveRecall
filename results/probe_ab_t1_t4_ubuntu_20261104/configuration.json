@@ -1,0 +1,108 @@
+{
+  "test_args": {
+    "t1": [
+      "--clients",
+      "20",
+      "--duration",
+      "20"
+    ],
+    "t2": [
+      "--clients",
+      "100",
+      "--duration",
+      "40"
+    ],
+    "t3": [
+      "--clients",
+      "100",
+      "--duration",
+      "60",
+      "--slow-percent",
+      "10",
+      "--slow-ms",
+      "500"
+    ],
+    "t4": [
+      "--clients",
+      "100",
+      "--duration",
+      "60",
+      "--disconnect-percent",
+      "20",
+      "--disconnect-at",
+      "15",
+      "--disconnect-seconds",
+      "5"
+    ]
+  },
+  "runs": 3,
+  "port": 8811,
+  "require_t5": false,
+  "environment": {
+    "started_utc": "2026-11-04T03:09:01.910912+00:00",
+    "platform": "Linux-6.8.0-147-generic-aarch64-with-glibc2.39",
+    "os_release": "PRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n",
+    "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "python_executable": "/home/ubuntu/fix-makefile-t5-7YbOtl/python-env/bin/python",
+    "websockets": "16.1.1",
+    "cpu_count": 2,
+    "memory": "MemTotal:        3995108 kB\nMemFree:         3048872 kB\nMemAvailable:    3681968 kB\nBuffers:           30692 kB\nCached:           714124 kB\nSwapCached:            0 kB\nActive:           219784 kB\nInactive:         567620 kB\nActive(anon):      51164 kB\nInactive(anon):        0 kB\nActive(file):     168620 kB\nInactive(file):   567620 kB\nUnevictable:       26360 kB\nMlocked:           26360 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:              1536 kB\nWriteback:             0 kB\nAnonPages:         68948 kB\nMapped:            50272 kB\nShmem:              1124 kB\nKReclaimable:      48560 kB\nSlab:              94248 kB\nSReclaimable:      48560 kB\nSUnreclaim:        45688 kB\nKernelStack:        1988 kB\nShadowCallStack:     540 kB\nPageTables:         2248 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:     1997552 kB\nCommitted_AS:     250996 kB\nVmallocTotal:   133141626880 kB\nVmallocUsed:        8308 kB\nVmallocChunk:          0 kB\nPercpu:              912 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nCmaTotal:          32768 kB\nCmaFree:           31232 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\n"
+  },
+  "source_sha256": {
+    "Makefile": "a3465f046464bfc3881b78a27aad8274e1c242f4d5212bc5bf9104fbad3a8447",
+    "experiments/probe_ab.py": "e46a7a58f0b3d9257487b173f53189d2b21c89169fe95b675755a55325d8eacd",
+    "network_profiles/delay_loss.sh": "8fd805fa3f8c3cf94d5ba355564343879790db5b1d645305eb5ae5d85273a8c0",
+    "network_profiles/reset.sh": "3fbba2a62dabcc59304125272037208ccaa453063dd4af95d7f973e49309bf05",
+    "submission_root/app/.___init__.py": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/app/._caption_store.py": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/app/._client.py": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/app/._outbound_buffer.py": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/app/._protocol.py": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/app/._server.py": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/app/._source.py": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/app/__init__.py": "e0a8344c6d7e1e2a7e8f7410f95c11dba254e6e026a85d7f433c18360dfb589f",
+    "submission_root/app/caption_store.py": "ad2b61a7cd2bab6504b88c10d6af7ea4558f0346675bc310d83bc0ad0536979e",
+    "submission_root/app/client.py": "cb47e52efdc7de9206aa8db3e2604cb45bb8a23478edc6699833dd0c992994ac",
+    "submission_root/app/outbound_buffer.py": "cdb447bbdf7744a0712d8c0f85017ae8b9685fb0b348005681dd1be6081023dc",
+    "submission_root/app/protocol.py": "4eb8e3535eff1e7e74cc4516af95b31c74e9cce74983ef6c0b3ba169aecabec3",
+    "submission_root/app/server.py": "6e1372041a838514443a813d7082c3821e3b9a5f756ca3388c9823c3d8377f48",
+    "submission_root/app/source.py": "364894cf72d55c4c9588f248544421fcd013ce9f00c1e5b1db43a2a36e9d1e3f",
+    "submission_root/client/._app.js": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/client/._index.html": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "submission_root/client/app.js": "38b1affa3f635cc702e49c71539e475430247a696595fcc7d3314740492c7f62",
+    "submission_root/client/index.html": "d5fe08b45a3c2fe434b4c4c1704cef167e1c43c40975724d41571bcc6697a009",
+    "submission_root/requirements.txt": "92f7583b965e8641ab3b8644526192fa63c5cd94271318da3aefa7b782f87111",
+    "submission_root/solution_server.py": "ab2093e91c84907e776a03c5089f00d55e3b8e2ae2c1322a03e98b5c97d628e7",
+    "test/._analyse_results.py": "93b25289cb86fe060b27b899013335333fb3cb3796812f40826cd2cfc18a55cd",
+    "test/._caption_source.py": "93b25289cb86fe060b27b899013335333fb3cb3796812f40826cd2cfc18a55cd",
+    "test/._load_clients.py": "93b25289cb86fe060b27b899013335333fb3cb3796812f40826cd2cfc18a55cd",
+    "test/._monitor_server.py": "93b25289cb86fe060b27b899013335333fb3cb3796812f40826cd2cfc18a55cd",
+    "test/._run_demo.py": "8e51e3d4000e341d2d649388bc2e7655837d729191861a9e124f2fc3342070ba",
+    "test/._submission_check.py": "93b25289cb86fe060b27b899013335333fb3cb3796812f40826cd2cfc18a55cd",
+    "test/analyse_results.py": "78a497ff527f1e22f5856ec48de06b4aba683134dd449923af76a1daccf65021",
+    "test/caption_source.py": "e86acd825b81833d2aff638e6f6aec3648a2e0429d35890ac62966846ccdff05",
+    "test/load_clients.py": "22909f48acb15325237cd1e04e7ad5734e2243f853fbfe38d2b5ccedd1d31c84",
+    "test/monitor_server.py": "c27bf1b0e0b586c1b01abccd21eaf9eb7b4ffa88e8477a5010ca0cb8b5657a40",
+    "test/run_demo.py": "d12654c7032a26c4047db7eaa75cb20e90cfe7c13f30be1bea3ce00cc06b50b5",
+    "test/sample_transcript.txt": "5120733bd5a3c463227397d4b641844ad2980a82063841dac2ed601eba170d76",
+    "test/submission_check.py": "5e5176e44e4a1bb7bc6b3a03ea5a5587aec3abf09620a177f8ac585e6aa00067"
+  },
+  "outcomes": {
+    "t1": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t2": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t3": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t4": {
+      "with_probe": 0,
+      "no_probe": 0
+    }
+  }
+}
