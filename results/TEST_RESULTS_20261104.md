@@ -1,5 +1,7 @@
 # Updated public test results — 4 November 2026
 
+**One-core follow-up:** T2–T4 were subsequently rerun three times per configuration with the Ubuntu VM set to one virtual CPU. All 18 runs completed successfully; one core did not resolve source generation overrunning the client deadline. See the [one-core results and two-core comparison](probe_ab_t2_t4_1core_ubuntu_20261104/COMPARISON.md). The two-core results below remain the original evidence set.
+
 Branch: `tests/refresh-t1-t4-ubuntu-20261104`. Application, test harness, and experiment sources match commit `81608f5`.
 
 T1–T4 were rerun in Ubuntu with three independent runs per configuration (24 new runs). T5 reuses the six Ubuntu runs recorded earlier on 4 November 2026: every recorded application, browser, harness, experiment, Makefile, and network-profile SHA-256 hash matches this rerun and the current source. T5 was not rerun. Older evidence is preserved.

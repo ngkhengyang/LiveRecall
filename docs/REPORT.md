@@ -123,29 +123,31 @@ completeness, and reconnect restores only the requested recent context.
 
 ### 4.1 Reproducible setup
 
-T1-T4 use the Ubuntu rerun in `results/probe_ab_t1_t4_ubuntu_20261104/`;
-T5 reuses the earlier same-day results in `results/probe_ab_t5_ubuntu_20261104/`.
-Both sets ran on 4 November 2026 in Ubuntu 24.04.5 LTS, Linux 6.8.0-147-generic
-ARM64, with two vCPUs, approximately 4 GiB RAM, Python 3.12.3 and websockets
-16.1.1. Application and public-harness hashes match implementation `81608f5`.
+T1-T5 use the complete Ubuntu run added in commit `e0f7fd9`, archived in
+`results/prob_ab_david/probe_ab/`. The recorded environment on 4 November 2026
+was Ubuntu 26.04.1 LTS, Linux 7.0.0-42-generic x86_64, one vCPU, approximately
+3.32 GiB RAM, Python 3.14.4 and websockets 16.1.1. All recorded source hashes
+match the current application, public harness and experiment scripts. This
+replaces the earlier ARM64 VM evidence; differences between the evidence sets
+do not measure an implementation change.
+
 The source uses nominal 200-ms revision delays and 350-ms segment gaps; other
 settings are seed 3103, a one-second source start delay, 30-second history,
 500-ms freshness threshold and port 8811. No extra drain interval was added.
-
 The supplied measurement logic was unchanged. Each test used three independent
 runs per configuration, restarting the server each time and reporting the median
 of per-run metrics. **Section 4 uses with-probe results only; Section 5 compares
 with and without probes.** Server, source and simulated clients ran in the same
-Ubuntu VM. T1-T4 used `noqueue` loopback; T5 used 120 ms delay, 30 ms
+Ubuntu VM. Loopback was initially `noqueue`; T5 applied 120 ms delay, 30 ms
 normal-distribution jitter and 3% loss, with a verified reset afterwards.
 
 | Test | Required scenario | Configuration / evidence path |
 |---|---|---|
-| T1 | 20 clients, 20 s; 22 expected segments | `results/probe_ab_t1_t4_ubuntu_20261104/` |
-| T2 | 100 clients, 40 s; 49 expected segments | Same T1-T4 directory |
-| T3 | 100 clients, 60 s, 10% slow; 500 ms sleep/message; 76 expected segments | Same T1-T4 directory |
-| T4 | 100 clients, 60 s, 20% disconnect at 15 s for 5 s; 76 expected segments | Same T1-T4 directory |
-| T5 | 100 clients, 40 s; 49 expected segments; loopback netem | `results/probe_ab_t5_ubuntu_20261104/` |
+| T1 | 20 clients, 20 s; 22 expected segments | `results/prob_ab_david/probe_ab/` |
+| T2 | 100 clients, 40 s; 49 expected segments | Same directory |
+| T3 | 100 clients, 60 s, 10% slow; 500 ms sleep/message; 76 expected segments | Same directory |
+| T4 | 100 clients, 60 s, 20% disconnect at 15 s for 5 s; 76 expected segments | Same directory |
+| T5 | 100 clients, 40 s; 49 expected segments; loopback netem | Same directory |
 
 ### 4.2 Measured results
 
@@ -154,17 +156,17 @@ the public analyser computes its percentiles over accepted live updates. Final
 completeness counts correctly received unique finals, including recovered history,
 against expected finals across clients. The following table gives **with-probe
 three-run medians**. T3 group metrics are derived from the CSV role flags;
-other aggregate values reproduce the saved JSON summaries.
+all 30 raw CSV files reproduce their saved JSON summaries exactly.
 
 | Test / client group | P50 age (ms) | P95 age (ms) | P99 age (ms) | Final completeness (%) |
 |---|---:|---:|---:|---:|
-| T1 | 3.95 | 6.57 | 8.29 | 100.00 |
-| T2 | 13.84 | 21.87 | 28.60 | 91.84 |
-| T3 overall | 13.08 | 2,787.66 | 8,241.15 | 90.13 |
-| T3 normal readers | 12.75 | 21.01 | 30.85 | 90.79 |
-| T3 slow readers | 6,515.51 | 8,876.66 | 9,169.73 | 84.21 |
-| T4 | 12.20 | 19.53 | 25.05 | 89.47 |
-| T5 (reused) | 255.26 | 702.30 | 1,057.88 | 100.00 |
+| T1 | 3.28 | 6.67 | 8.11 | 100.00 |
+| T2 | 15.82 | 27.85 | 36.93 | 100.00 |
+| T3 overall | 11.99 | 2,248.88 | 7,786.01 | 99.38 |
+| T3 normal readers | 11.45 | 23.88 | 30.44 | 100.00 |
+| T3 slow readers | 6,250.78 | 8,490.87 | 8,811.84 | 93.82 |
+| T4 | 5.29 | 8.80 | 12.55 | 100.00 |
+| T5 | 258.43 | 660.66 | 801.68 | 100.00 |
 
 Fresh Caption Ratio is the fraction of accepted live updates within threshold T
 (public default: 500 ms). Fresh Final Caption Ratio counts unique finals received
@@ -175,58 +177,54 @@ this live revision coverage and separately shows the T3 reader groups.
 | Test / client group | Fresh Caption Ratio (%) | Fresh Final Caption Ratio (%) | Live revision coverage (%) |
 |---|---:|---:|---:|
 | T1 | 100.00 | 100.00 | 100.00 |
-| T2 | 100.00 | 91.84 | 91.84 |
-| T3 overall | 94.48 | 81.71 | 86.58 |
-| T3 normal readers | 100.00 | 90.79 | 90.79 |
-| T3 slow readers | 1.80 | 0.00 | 48.68 |
-| T4 | 100.00 | 88.16 | 87.98 |
-| T5 (reused) | 88.98 | 87.12 | 98.53 |
+| T2 | 100.00 | 100.00 | 100.00 |
+| T3 overall | 94.65 | 90.00 | 95.18 |
+| T3 normal readers | 100.00 | 100.00 | 100.00 |
+| T3 slow readers | 1.69 | 0.00 | 51.75 |
+| T4 | 100.00 | 98.42 | 98.33 |
+| T5 | 91.28 | 87.39 | 98.86 |
 
-All 15 selected with-probe runs recorded zero duplicate/stale captions, invalid
-non-final HISTORY items and connection errors. T4's 20 forced-disconnect clients
-reconnected and received HISTORY in every run. Median HISTORY-response P95 was
-4.51 ms; this is not a separate measurement of complete-state recovery time.
-No RSS/CPU or queue-high-water trace was collected.
+All 15 with-probe runs recorded zero duplicate/stale captions, invalid non-final
+HISTORY items and connection errors. T4's 20 forced-disconnect clients reconnected
+and received HISTORY in every run. Median HISTORY-response P95 was 3.31 ms;
+this is not a separate measurement of complete-state recovery time. No RSS/CPU
+or queue-high-water trace was collected.
 
 ### 4.3 Interpretation
 
-**Source timing limits completeness interpretation.** The runner estimates
-segment count from nominal 0.75 s/segment, while clients stop at a fixed deadline.
-An observer reading existing logs measured source completion at 65.95-68.70 s
-after client start in ten T3/T4 runs, beyond their 60-s windows. SOURCE_DONE
-follows the final segment gap and socket close; exact final-emission times were
-not captured. Finals absent from every client may have been generated after
-clients stopped, while the analyser still counts them as expected. These are
-unchanged public measurements, not proof that all missing finals were server
-losses. Missing deliveries also do not enter live-age percentiles.
+**Deadline and source timing.** Clients stop at a fixed deadline, and absent
+deliveries do not enter live-age percentiles. Unlike the earlier ARM64 runs,
+all T3 normal readers received every expected final in both configurations.
+The CSV `source_ts` for final segment 76 was 57.84-58.12 s after the first
+recorded connection across the six T3 runs, within the 60-s window. The remaining
+T3 completeness deficit is confined to slow readers; source generation beyond
+the deadline does not explain it in this evidence set.
 
-**T1-T2: normal delivery and scale.** T1 received every expected final and
-revision, with P99 age 8.29 ms. T2's P99 was 28.60 ms and median completeness
-91.84%. Its first run received 4,400/4,900 finals; finals 45-49 were absent from
-all clients. Source timing must be resolved before attributing this shortfall
-to the server's delivery policy.
+**T1-T2: normal delivery and scale.** Every expected final and revision arrived
+in all runs. T1 P99 age was 8.11 ms; at 100 clients, T2 P95/P99 was
+27.85/36.93 ms. Both tests had 100% fresh captions and fresh finals at 500 ms.
 
 **T3: normal readers stay responsive, but slow readers lag.** Normal-reader
-P95/P99 was 21.01/30.85 ms, close to T2's 21.87/28.60 ms. Each normal reader
-received finals 1-69 in every run, giving 90.79% completeness against 76 expected.
-Slow readers received 640, 639 and 660 of 760 expected pairs, with median
-completeness 84.21% and P95 age 8.88 s. In run 3, slow readers missed finals
-67-69 that normal readers received; finals 70-76 were absent from everyone.
-This identifies a slow-reader backlog separately from the source-timing limit.
+P95/P99 was 23.88/30.44 ms, compared with T2's 27.85/36.93 ms, and final
+completeness was 100%. Slow readers received 720, 710 and 713 of 760 expected
+final/client pairs, giving 93.82% median completeness and P95 age 8.49 s.
+Overall completeness was 99.38%. Normal readers retained every revision while
+slow-reader live revision coverage was 51.75%, consistent with coalescing and
+backlog under the imposed 500-ms processing delay.
 
-**T4: reconnect works, but complete final delivery is not established.** Every
-forced-disconnect client reconnected and received HISTORY, with median response
-P95 4.51 ms. Each run received 6,800/7,600 finals; finals 69-76 were absent from
-all clients. Live-update P99 was 25.05 ms. HISTORY-response timing and zero
-duplicate/stale counts support reconnect behavior but do not establish complete
-recovery by the deadline.
+**T4: reconnect restores all expected finals by the deadline.** Every
+forced-disconnect client reconnected and received HISTORY in each run; all
+7,600 expected final/client pairs arrived. Median HISTORY-response P95 was
+3.31 ms and live-update P99 was 12.55 ms. Live revision coverage was 98.33%
+because recovery supplies finals rather than every missed draft. Fresh-final
+ratio was 98.42%; HISTORY-response timing does not measure complete recovery time.
 
-**T5: impairment increases age while all expected finals arrive.** The reused
-runs each received 4,900/4,900 final/client pairs. P50 was 255.26 ms and P95/P99
-702.30/1,057.88 ms; fresh-final ratio was 87.12% at 500 ms. This is consistent
+**T5: impairment increases age while all expected finals arrive.** Each run
+received 4,900/4,900 final/client pairs. P50 was 258.43 ms and P95/P99
+660.66/801.68 ms; fresh-final ratio was 87.39% at 500 ms. This is consistent
 with delay/jitter and TCP retransmission/ordered-delivery effects, without
 isolating their contributions. Loopback netem affects both source and receiver
-traffic. Live revision coverage was 98.53%.
+traffic. Live revision coverage was 98.86%.
 
 ## 5. Before/after optimization comparison
 
@@ -234,48 +232,47 @@ The final with-probe design is compared with a copied client whose probe task
 is not started. Queue-pressure coalescing and the send timeout remain. Disabling
 the probe removes lag detection, probe-driven wakeups/pacing and probe stall
 detection together. Both configurations use the same public parameters and
-three independent runs; changes below are with-probe minus no-probe, using
-unrounded medians. T3 uses the fresh rerun and T5 the reused same-day evidence.
+three independent runs from the same evidence set; changes below are with-probe
+minus no-probe, using unrounded medians.
 
 | Metric (include unit) | Baseline / probe disabled | Final / probe enabled | Change |
 |---|---:|---:|---:|
-| T3 final completeness (%) | 83.03 | 90.13 | +7.11 pp |
-| T3 P99 age (ms) | 21,644.60 | 8,241.15 | -13,403.45 |
-| T3 slow-reader P95 age (ms) | 24,919.67 | 8,876.66 | -16,043.01 |
-| T3 normal-reader P95 age (ms) | 16.31 | 21.01 | +4.70 |
-| T3 live revision coverage (%) | 83.77 | 86.58 | +2.81 pp |
-| T5 final completeness (%) | 99.90 | 100.00 | +0.10 pp |
-| T5 live revision coverage (%) | 99.82 | 98.53 | -1.29 pp |
-| T5 P95 age (ms) | 714.75 | 702.30 | -12.46 |
-| T5 P99 age (ms) | 1,040.24 | 1,057.88 | +17.64 |
+| T3 final completeness (%) | 95.13 | 99.38 | +4.25 pp |
+| T3 P99 age (ms) | 24,035.07 | 7,786.01 | -16,249.06 |
+| T3 slow-reader P95 age (ms) | 28,093.65 | 8,490.87 | -19,602.78 |
+| T3 normal-reader P95 age (ms) | 17.26 | 23.88 | +6.62 |
+| T3 live revision coverage (%) | 95.18 | 95.18 | +0.00 pp |
+| T5 final completeness (%) | 99.98 | 100.00 | +0.02 pp |
+| T5 live revision coverage (%) | 99.97 | 98.86 | -1.12 pp |
+| T5 P95 age (ms) | 905.82 | 660.66 | -245.16 |
+| T5 P99 age (ms) | 1,270.90 | 801.68 | -469.22 |
 
-With probes, T3 median slow-reader P95 was 64.4% lower and overall P99 61.9%
-lower, while normal-reader P95 was 4.70 ms higher. Earlier lag detection and
-coalescing can avoid sending obsolete drafts, consistent with reduced backlog.
-All with-probe runs preceded no-probe runs, however, and source pacing differed:
-one observed T3 with-probe source completed at 65.95 s, versus 68.51-68.70 s
-without probes. Different work generated before the deadline confounds the
-completeness/coverage comparison; +7.11 pp is an observed difference, not an
-isolated server-delivery improvement.
+With probes, T3 median slow-reader P95 was 69.8% lower and overall P99 67.6%
+lower, while normal-reader P95 was 6.62 ms higher. Normal readers received every
+final in both configurations; median slow-reader completeness increased from
+51.32% to 93.82%. Earlier lag detection and coalescing are consistent with
+reduced backlog. Both configurations had identical 95.18% overall live revision
+coverage, so coverage alone does not capture the improvement in final delivery.
+All with-probe runs preceded no-probe runs; these three-run differences remain
+descriptive rather than an isolated causal estimate.
 
-T5 received 4,900 finals per with-probe run versus 4,900, 4,895 and 4,822 without
-probes; missing finals were segment 49 at the deadline. The trade-off was 1.29 pp
-lower live revision coverage. P99 rose slightly, latency ranges overlapped and
-random loss sequences differed, so these runs do not establish a general latency
-speedup. Eventual delivery beyond the observation deadline was not measured.
+T5 received 4,900 finals per with-probe run versus 4,899, 4,899 and 4,900 without
+probes. The trade-off was 1.12 pp lower live revision coverage. Median P95/P99
+was lower by 245.16/469.22 ms, but network loss sequences differed and fixed
+arm order limits attribution to probing. Eventual delivery beyond the observation
+deadline was not measured.
 
 ## 6. Discussion, limitations and future work
 
-**Failures and trade-offs.** T3 normal-reader P95 was 21.01 ms, while slow
-readers had 84.21% median completeness and 8.88-s P95 age. Normal readers stayed
-responsive, but source completion beyond client deadlines confounds final
-completeness; the separate slow-reader backlog remains unresolved. T5 received
-all expected finals but exceeded the 500-ms freshness threshold at P95.
-Coalescing reduces obsolete draft traffic at the cost of intermediate revision
-coverage. Longer catch-up leases discourage repeated overload but can postpone
-the return to full revisions after a receiver improves. Exact source-emission
-and delivery traces are needed to distinguish late generation from pending
-final delivery at the measurement deadline.
+**Failures and trade-offs.** T3 normal-reader P95 was 23.88 ms with 100%
+final completeness, while slow readers had 93.82% median completeness and
+8.49-s P95 age. Normal readers stayed responsive, but slow readers still
+missed finals generated within the measurement window. T5 received all expected
+finals but exceeded the 500-ms freshness threshold at P95. Coalescing reduces
+obsolete draft traffic at the cost of intermediate revision coverage. Longer
+catch-up leases discourage repeated overload but can postpone the return to
+full revisions after a receiver improves. Delivery traces are needed to locate
+where slow-reader finals remain pending at the measurement deadline.
 
 **Limitations.** Lag detection measures transport responsiveness without
 measuring the receiver's caption-processing rate. Healthy pongs can therefore
@@ -301,18 +298,30 @@ delivery preserves isolation and bounded resource use.
 ## References
 
 - CS3103 Assignment 4 specification, Sections 8-12 (experiments, metrics, environment, report requirements).
-- [Fresh Ubuntu T1-T4 evidence](../results/probe_ab_t1_t4_ubuntu_20261104/SUMMARY.md) and [reused Ubuntu T5 evidence](../results/probe_ab_t5_ubuntu_20261104/SUMMARY.md), including each configuration and both arms' CSV/JSON files.
+- [Latest Ubuntu T1-T5 comparison](../results/prob_ab_david/probe_ab/SUMMARY.md) and [recorded configuration](../results/prob_ab_david/probe_ab/configuration.json), including source hashes, environment and both arms' CSV/JSON files.
 - TODO: Cite external technical sources actually used.
 
 ## Appendices
 
-[Combined results and run caveats](../results/TEST_RESULTS_20261104.md) link to
-per-run values, source timing observations, environment details and verification
-of all 30 CSV/JSON pairs. The original evidence remains preserved.
+Per-run CSV/JSON files and logs are stored alongside the
+[latest full comparison](../results/prob_ab_david/probe_ab/SUMMARY.md), under
+`with_probe/output/` and `no_probe/output/`. The [configuration](../results/prob_ab_david/probe_ab/configuration.json)
+records the environment, source hashes, test arguments and successful runner
+exits for all ten test/configuration combinations. T5's `qdisc_*.json` files and
+`t5_network_status.json` record impairment application, traffic counters and reset.
+All 30 summaries were recomputed from their CSVs with the public analyser; T3
+reader-group metrics use the same definitions restricted by the CSV `slow` flag.
 
-TODO: Put exact commands, per-run outputs, detailed configurations, and any code
-walkthrough here or link to repository evidence. Keep the required design,
-aggregate results, comparison, and analysis in the main 4-5 pages.
+To reproduce from the repository root inside Ubuntu with the recorded dependencies
+and sudo/netem available, use a fresh output directory:
+
+```sh
+venv/bin/python -u experiments/probe_ab.py --tests t1,t2,t3,t4,t5 --runs 3 \
+  --port 8811 --venv "$PWD/venv" --require-t5 --out output/probe_ab_fresh
+```
+
+[Earlier ARM64 results and run caveats](../results/TEST_RESULTS_20261104.md)
+remain available for comparison; their values are not used in Sections 4-5.
 
 ## Draft completion checklist (remove before export)
 
