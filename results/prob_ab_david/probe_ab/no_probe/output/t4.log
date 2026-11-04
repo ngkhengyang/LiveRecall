@@ -1,0 +1,109 @@
+
+=== Run 1/3 ===
+Clients=100, duration=60.0s, source segments=76
+Starting 100 clients; slow=0, disconnecting=20, late=0
+SOURCE_DONE: emitted 76 finalized segments
+Results written to /media/sf_LiveRecall/output/probe_ab/no_probe/output/t4_run01.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         22420
+Recovered history items:       120
+Accepted messages:             22420
+Recovered messages:            120
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               12.51 ms
+P95 caption age:               23.90 ms
+P99 caption age:               32.16 ms
+Fresh Caption Ratio (<=500 ms): 100.00%
+Fresh Final Caption Ratio (<=500 ms): 98.42%
+Successful connections:        120
+Connection errors:             0
+Unique final captions:         7600/7600
+Final-caption completeness:    100.00%
+Unique live revisions:         22420/22800
+Normal Update Coverage:        98.33%
+
+Reconnect / late-join HISTORY response
+--------------------------------------
+Recovery P50: 10.03 ms
+Recovery P95: 12.17 ms
+Note: fast HISTORY response alone does not prove correct recovery; check final completeness and duplicate/stale counts too.
+
+=== Run 2/3 ===
+Clients=100, duration=60.0s, source segments=76
+Starting 100 clients; slow=0, disconnecting=20, late=0
+SOURCE_DONE: emitted 76 finalized segments
+Results written to /media/sf_LiveRecall/output/probe_ab/no_probe/output/t4_run02.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         22420
+Recovered history items:       120
+Accepted messages:             22420
+Recovered messages:            120
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               11.04 ms
+P95 caption age:               23.13 ms
+P99 caption age:               28.11 ms
+Fresh Caption Ratio (<=500 ms): 100.00%
+Fresh Final Caption Ratio (<=500 ms): 98.42%
+Successful connections:        120
+Connection errors:             0
+Unique final captions:         7600/7600
+Final-caption completeness:    100.00%
+Unique live revisions:         22420/22800
+Normal Update Coverage:        98.33%
+
+Reconnect / late-join HISTORY response
+--------------------------------------
+Recovery P50: 10.09 ms
+Recovery P95: 10.29 ms
+Note: fast HISTORY response alone does not prove correct recovery; check final completeness and duplicate/stale counts too.
+
+=== Run 3/3 ===
+Clients=100, duration=60.0s, source segments=76
+Starting 100 clients; slow=0, disconnecting=20, late=0
+SOURCE_DONE: emitted 76 finalized segments
+Results written to /media/sf_LiveRecall/output/probe_ab/no_probe/output/t4_run03.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         22400
+Recovered history items:       140
+Accepted messages:             22400
+Recovered messages:            140
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               11.70 ms
+P95 caption age:               23.06 ms
+P99 caption age:               32.46 ms
+Fresh Caption Ratio (<=500 ms): 100.00%
+Fresh Final Caption Ratio (<=500 ms): 98.42%
+Successful connections:        120
+Connection errors:             0
+Unique final captions:         7600/7600
+Final-caption completeness:    100.00%
+Unique live revisions:         22400/22800
+Normal Update Coverage:        98.25%
+
+Reconnect / late-join HISTORY response
+--------------------------------------
+Recovery P50: 5.73 ms
+Recovery P95: 13.80 ms
+Note: fast HISTORY response alone does not prove correct recovery; check final completeness and duplicate/stale counts too.
+
+=== Median across independent runs ===
+P50 caption age                    11.70 ms
+P95 caption age                    23.13 ms
+P99 caption age                    32.16 ms
+Fresh Caption Ratio               100.00 %
+Fresh Final Caption Ratio          98.42 %
+Final completeness                100.00 %
+Normal Update Coverage             98.33 %
+Normal-client P95                  23.13 ms
+Recovery P95                       12.17 ms
+
+Public run complete. CSV and JSON result files were written in output/.

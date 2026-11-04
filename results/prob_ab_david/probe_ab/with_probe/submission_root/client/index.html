@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LiveRecall</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --border: #d9dde3;
+      --text: #15181d;
+      --muted: #5d6673;
+      --accent: #2f6df6;
+      --final: #1f7a44;
+      --final-bg: #e8f5ed;
+      --live: #9a6400;
+      --live-bg: #fdf3e0;
+      --danger: #b3261e;
+      --radius: 10px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #14171c;
+        --surface: #1c2027;
+        --border: #2e343d;
+        --text: #e9edf3;
+        --muted: #9aa4b2;
+        --accent: #6d9bff;
+        --final: #5fcf8d;
+        --final-bg: #16301f;
+        --live: #e8b65c;
+        --live-bg: #332710;
+        --danger: #ff8a80;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #14171c; --surface: #1c2027; --border: #2e343d; --text: #e9edf3;
+      --muted: #9aa4b2; --accent: #6d9bff; --final: #5fcf8d; --final-bg: #16301f;
+      --live: #e8b65c; --live-bg: #332710; --danger: #ff8a80;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 1.5rem 16px 3rem;
+      background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+    .wrap { max-width: 980px; margin: 0 auto; }
+
+    header { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-bottom: 1rem; }
+    h1 { font-size: 1.5rem; margin: 0; letter-spacing: -.01em; }
+    h2 { font-size: 1rem; margin: 0 0 .6rem; color: var(--muted); font-weight: 600;
+         text-transform: uppercase; letter-spacing: .06em; }
+
+    #status {
+      margin-left: auto; display: inline-flex; align-items: center; gap: .5rem;
+      padding: .35rem .8rem; border-radius: 999px; font-size: .9rem; font-weight: 600;
+      background: var(--surface); border: 1px solid var(--border);
+    }
+    #status::before {
+      content: ""; width: .6rem; height: .6rem; border-radius: 50%; background: var(--muted);
+    }
+    #status[data-state="connected"] { color: var(--final); }
+    #status[data-state="connected"]::before { background: var(--final); }
+    #status[data-state="connecting"] { color: var(--live); }
+    #status[data-state="connecting"]::before { background: var(--live); }
+    #status[data-state="offline"] { color: var(--danger); }
+    #status[data-state="offline"]::before { background: var(--danger); }
+
+    section {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1rem; margin-bottom: 1rem;
+    }
+
+    #live { min-height: 9rem; max-height: 26rem; overflow-y: auto; }
+    #live:empty::after {
+      content: "Waiting for captions from the lecture...";
+      color: var(--muted); font-style: italic;
+    }
+
+    .caption { display: flex; gap: .7rem; align-items: baseline;
+               padding: .4rem 0; border-bottom: 1px solid var(--border); }
+    .caption:last-child { border-bottom: 0; }
+    .caption .seg { color: var(--muted); font-variant-numeric: tabular-nums;
+                    font-size: .8rem; min-width: 3.2rem; }
+    .caption .badge {
+      font-size: .68rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+      padding: .12rem .45rem; border-radius: 4px; white-space: nowrap;
+    }
+    .caption .text { flex: 1; font-size: 1.08rem; }
+
+    .caption.is-live .badge { background: var(--live-bg); color: var(--live); }
+    .caption.is-live .text { color: var(--muted); font-style: italic; }
+    .caption.is-live { border-left: 3px solid var(--live); padding-left: .6rem; margin-left: -.6rem; }
+    .caption.is-final .badge { background: var(--final-bg); color: var(--final); }
+
+    .controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .8rem; }
+    button, input {
+      font: inherit; font-size: .92rem; padding: .5rem .9rem; cursor: pointer;
+      border-radius: 7px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text);
+    }
+    button:hover { border-color: var(--accent); }
+    button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.ghost { color: var(--muted); }
+    #disconnect-ms { width: 9rem; cursor: text; }
+
+    #recall-section { max-height: 40rem; display: flex; flex-direction: column; }
+    #recall-section > h2, #recall-section > .controls, #recall-section > .hint { flex-shrink: 0; }
+    #recall { min-height: 0; overflow-y: auto; }
+    #recall .caption .text { font-style: normal; color: var(--text); }
+    #recall:empty::after { content: "Nothing finalized in this window yet."; color: var(--muted); font-style: italic; }
+    .recall-time { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; min-width: 3.5rem; }
+
+    #stats { display: flex; flex-wrap: wrap; gap: .4rem 1.5rem; font-size: .85rem; color: var(--muted); }
+    #stats b { color: var(--text); font-variant-numeric: tabular-nums; }
+    .hint { font-size: .85rem; color: var(--muted); margin: .5rem 0 0; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>LiveRecall</h1>
+    <span id="status" data-state="offline">starting</span>
+  </header>
+
+  <section>
+    <h2>Live captions</h2>
+    <div id="live"></div>
+    <p class="hint">A provisional caption is replaced in place by each newer revision of the same segment; it is never shown twice.</p>
+  </section>
+
+  <section id="recall-section">
+    <h2>What did I miss?</h2>
+    <div class="controls">
+      <button data-seconds="15" aria-pressed="false">15 s</button>
+      <button data-seconds="30" aria-pressed="true">30 s</button>
+      <button data-seconds="60" aria-pressed="false">60 s</button>
+      <button id="refresh" class="ghost">Refresh</button>
+    </div>
+    <div id="recall"></div>
+    <p class="hint">Served from captions already stored in this browser. The server is only asked for context after a genuine disconnection or a late join.</p>
+  </section>
+
+  <section>
+    <h2>Connection</h2>
+    <div class="controls">
+      <label for="disconnect-ms">Disconnect duration (ms)</label>
+      <input id="disconnect-ms" type="number" min="1"q" max="2147483647" step="1" value="5000" required>
+      <button id="drop" class="ghost">Simulate disconnect</button>
+    </div>
+    <div id="stats"></div>
+  </section>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

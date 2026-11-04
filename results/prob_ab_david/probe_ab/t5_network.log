@@ -1,0 +1,4 @@
+sudo: interactive authentication is required
+Applied delay+jitter+3% IP packet loss on lo
+Reminder: WebSocket uses TCP; loss/reordering appears mainly as retransmission/head-of-line delay, not missing application messages.
+Reset qdisc on lo

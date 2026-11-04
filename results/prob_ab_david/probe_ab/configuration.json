@@ -1,0 +1,103 @@
+{
+  "test_args": {
+    "t1": [
+      "--clients",
+      "20",
+      "--duration",
+      "20"
+    ],
+    "t2": [
+      "--clients",
+      "100",
+      "--duration",
+      "40"
+    ],
+    "t3": [
+      "--clients",
+      "100",
+      "--duration",
+      "60",
+      "--slow-percent",
+      "10",
+      "--slow-ms",
+      "500"
+    ],
+    "t4": [
+      "--clients",
+      "100",
+      "--duration",
+      "60",
+      "--disconnect-percent",
+      "20",
+      "--disconnect-at",
+      "15",
+      "--disconnect-seconds",
+      "5"
+    ],
+    "t5": [
+      "--clients",
+      "100",
+      "--duration",
+      "40"
+    ]
+  },
+  "runs": 3,
+  "port": 8811,
+  "require_t5": true,
+  "environment": {
+    "started_utc": "2026-11-04T06:18:41.798720+00:00",
+    "platform": "Linux-7.0.0-42-generic-x86_64-with-glibc2.43",
+    "os_release": "PRETTY_NAME=\"Ubuntu 26.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"26.04\"\nVERSION=\"26.04.1 LTS (Resolute Raccoon)\"\nVERSION_CODENAME=resolute\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=resolute\nLOGO=ubuntu-logo\n",
+    "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+    "python_executable": "/home/vboxuser/Desktop/venv/bin/python",
+    "websockets": "16.1.1",
+    "cpu_count": 1,
+    "memory": "MemTotal:        3480672 kB\nMemFree:          597924 kB\nMemAvailable:    2141648 kB\nBuffers:           16320 kB\nCached:          1712136 kB\nSwapCached:            0 kB\nActive:           729724 kB\nInactive:        1775848 kB\nActive(anon):     361916 kB\nInactive(anon):   449988 kB\nActive(file):     367808 kB\nInactive(file):  1325860 kB\nUnevictable:          16 kB\nMlocked:              16 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:               320 kB\nWriteback:             0 kB\nAnonPages:        777236 kB\nMapped:           394976 kB\nShmem:             35044 kB\nKReclaimable:     102588 kB\nSlab:             214392 kB\nSReclaimable:     102588 kB\nSUnreclaim:       111804 kB\nKernelStack:        8976 kB\nPageTables:        20276 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:     1740336 kB\nCommitted_AS:    4933324 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       29668 kB\nVmallocChunk:          0 kB\nPercpu:              856 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:    161792 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nGPUActive:         31760 kB\nGPUReclaim:            0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      126912 kB\nDirectMap2M:     4067328 kB\n"
+  },
+  "source_sha256": {
+    "Makefile": "a3465f046464bfc3881b78a27aad8274e1c242f4d5212bc5bf9104fbad3a8447",
+    "experiments/probe_ab.py": "e46a7a58f0b3d9257487b173f53189d2b21c89169fe95b675755a55325d8eacd",
+    "network_profiles/delay_loss.sh": "8fd805fa3f8c3cf94d5ba355564343879790db5b1d645305eb5ae5d85273a8c0",
+    "network_profiles/reset.sh": "3fbba2a62dabcc59304125272037208ccaa453063dd4af95d7f973e49309bf05",
+    "submission_root/app/__init__.py": "e0a8344c6d7e1e2a7e8f7410f95c11dba254e6e026a85d7f433c18360dfb589f",
+    "submission_root/app/caption_store.py": "ad2b61a7cd2bab6504b88c10d6af7ea4558f0346675bc310d83bc0ad0536979e",
+    "submission_root/app/client.py": "cb47e52efdc7de9206aa8db3e2604cb45bb8a23478edc6699833dd0c992994ac",
+    "submission_root/app/outbound_buffer.py": "cdb447bbdf7744a0712d8c0f85017ae8b9685fb0b348005681dd1be6081023dc",
+    "submission_root/app/protocol.py": "4eb8e3535eff1e7e74cc4516af95b31c74e9cce74983ef6c0b3ba169aecabec3",
+    "submission_root/app/server.py": "6e1372041a838514443a813d7082c3821e3b9a5f756ca3388c9823c3d8377f48",
+    "submission_root/app/source.py": "364894cf72d55c4c9588f248544421fcd013ce9f00c1e5b1db43a2a36e9d1e3f",
+    "submission_root/client/app.js": "38b1affa3f635cc702e49c71539e475430247a696595fcc7d3314740492c7f62",
+    "submission_root/client/index.html": "d5fe08b45a3c2fe434b4c4c1704cef167e1c43c40975724d41571bcc6697a009",
+    "submission_root/requirements.txt": "92f7583b965e8641ab3b8644526192fa63c5cd94271318da3aefa7b782f87111",
+    "submission_root/solution_server.py": "ab2093e91c84907e776a03c5089f00d55e3b8e2ae2c1322a03e98b5c97d628e7",
+    "test/analyse_results.py": "78a497ff527f1e22f5856ec48de06b4aba683134dd449923af76a1daccf65021",
+    "test/caption_source.py": "e86acd825b81833d2aff638e6f6aec3648a2e0429d35890ac62966846ccdff05",
+    "test/load_clients.py": "22909f48acb15325237cd1e04e7ad5734e2243f853fbfe38d2b5ccedd1d31c84",
+    "test/monitor_server.py": "c27bf1b0e0b586c1b01abccd21eaf9eb7b4ffa88e8477a5010ca0cb8b5657a40",
+    "test/run_demo.py": "d12654c7032a26c4047db7eaa75cb20e90cfe7c13f30be1bea3ce00cc06b50b5",
+    "test/sample_transcript.txt": "5120733bd5a3c463227397d4b641844ad2980a82063841dac2ed601eba170d76",
+    "test/submission_check.py": "5e5176e44e4a1bb7bc6b3a03ea5a5587aec3abf09620a177f8ac585e6aa00067"
+  },
+  "outcomes": {
+    "t1": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t2": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t3": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t4": {
+      "with_probe": 0,
+      "no_probe": 0
+    },
+    "t5": {
+      "with_probe": 0,
+      "no_probe": 0
+    }
+  }
+}

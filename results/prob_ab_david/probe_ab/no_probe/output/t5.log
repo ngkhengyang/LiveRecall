@@ -1,0 +1,90 @@
+
+=== Run 1/3 ===
+Clients=100, duration=40.0s, source segments=49
+Starting 100 clients; slow=0, disconnecting=0, late=0
+SOURCE_DONE: emitted 49 finalized segments
+Results written to /media/sf_LiveRecall/output/probe_ab/no_probe/output/t5_run01.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         14684
+Recovered history items:       3
+Accepted messages:             14684
+Recovered messages:            3
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               260.57 ms
+P95 caption age:               905.82 ms
+P99 caption age:               1117.19 ms
+Fresh Caption Ratio (<=500 ms): 85.59%
+Fresh Final Caption Ratio (<=500 ms): 82.16%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         4899/4900
+Final-caption completeness:    99.98%
+Unique live revisions:         14684/14700
+Normal Update Coverage:        99.89%
+
+=== Run 2/3 ===
+Clients=100, duration=40.0s, source segments=49
+Starting 100 clients; slow=0, disconnecting=0, late=0
+SOURCE_DONE: emitted 49 finalized segments
+Results written to /media/sf_LiveRecall/output/probe_ab/no_probe/output/t5_run02.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         14696
+Recovered history items:       0
+Accepted messages:             14696
+Recovered messages:            0
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               261.47 ms
+P95 caption age:               767.73 ms
+P99 caption age:               1270.90 ms
+Fresh Caption Ratio (<=500 ms): 86.38%
+Fresh Final Caption Ratio (<=500 ms): 86.59%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         4899/4900
+Final-caption completeness:    99.98%
+Unique live revisions:         14696/14700
+Normal Update Coverage:        99.97%
+
+=== Run 3/3 ===
+Clients=100, duration=40.0s, source segments=49
+Starting 100 clients; slow=0, disconnecting=0, late=0
+SOURCE_DONE: emitted 49 finalized segments
+Results written to /media/sf_LiveRecall/output/probe_ab/no_probe/output/t5_run03.csv
+LiveRecall Results
+==================
+Clients observed:              100
+Live caption messages:         14696
+Recovered history items:       1
+Accepted messages:             14696
+Recovered messages:            1
+Duplicate messages observed:   0
+Stale messages observed:       0
+P50 caption age:               269.30 ms
+P95 caption age:               1086.38 ms
+P99 caption age:               1994.12 ms
+Fresh Caption Ratio (<=500 ms): 82.10%
+Fresh Final Caption Ratio (<=500 ms): 74.96%
+Successful connections:        100
+Connection errors:             0
+Unique final captions:         4900/4900
+Final-caption completeness:    100.00%
+Unique live revisions:         14696/14700
+Normal Update Coverage:        99.97%
+
+=== Median across independent runs ===
+P50 caption age                   261.47 ms
+P95 caption age                   905.82 ms
+P99 caption age                  1270.90 ms
+Fresh Caption Ratio                85.59 %
+Fresh Final Caption Ratio          82.16 %
+Final completeness                 99.98 %
+Normal Update Coverage             99.97 %
+Normal-client P95                 905.82 ms
+
+Public run complete. CSV and JSON result files were written in output/.
