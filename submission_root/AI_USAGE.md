@@ -24,20 +24,24 @@ read from the shared caption log, while the receiver's buffer keeps the latest
 unfinished state for each active segment. The receiver returns to normal
 delivery after it catches up and its catch-up lease expires.
 
-We evaluated the probe using the saved with-probe versus no-probe experiments
-in `results/probe_ab/SUMMARY.md`, with three independent runs per configuration.
-For the T3 slow-reader workload, the recorded medians were:
+We evaluated the probe using the latest saved
+[with-probe versus no-probe experiments](../results/prob_ab_david/probe_ab/SUMMARY.md),
+with three independent runs per configuration. For the T3 slow-reader workload,
+the recorded medians were:
 
 | Metric | Without probe | With probe |
 |---|---:|---:|
-| Final completeness | 95.13% | 99.38% |
-| Slow-client P95 caption age | 28,015.74 ms | 8,470.33 ms |
-| Normal-client P95 caption age | 38.58 ms | 29.02 ms |
+| Overall final completeness | 95.13% | 99.38% |
+| Slow-client P95 caption age | 28,093.65 ms | 8,490.87 ms |
+| Normal-client P95 caption age | 17.26 ms | 23.88 ms |
 
-These measurements apply to the saved experiment configurations. They show
-the benefit under that slow-reader workload; they do not establish an
-improvement for every workload. Catch-up also trades intermediate revision
-coverage for faster delivery of useful caption state to lagging receivers.
+Overall final completeness increased by 4.25 percentage points and slow-client
+P95 caption age fell by 69.8%, while normal-client P95 increased by 6.62 ms.
+Overall live revision coverage was 95.18% in both configurations. All with-probe
+runs preceded no-probe runs, so these three-run differences are descriptive
+and do not establish an improvement for every workload. Catch-up can trade
+intermediate revision coverage for faster delivery of useful caption state to
+lagging receivers.
 
 ## One suggestion that was wrong, inefficient, or required modification
 
