@@ -5,17 +5,13 @@ Members: David Goh, Ng Kheng Yang, Wang Yanxiang, Qin Haichen
 ## 1. Architecture and protocol
 
 LiveRecall distributes a changing caption stream from one source to many
-browsers over WebSockets. The backend server decides which revisions are valid and
-manages delivery separately for each receiver according to its backlog and
-connection progress.
+browsers over WebSockets. The server validates revisions and manages each
+receiver's delivery independently.
 
-```text
-source --> Source --> Server --> CaptionStore (latest state + final log)
-                         |                    |
-                    accepted updates     replay finals
-                         v                    v
-                    Client: buffer + delivery cursor --> sender --> browser
-```
+![LiveRecall component architecture](../diagrams/architecture.png)
+
+*Figure 1. Source ingestion, shared caption state and independent per-receiver
+delivery inside one asyncio server.*
 
 `CaptionStore` is the shared authority for revision acceptance and recent finals.
 Each `Client` owns an `OutboundBuffer`, one sender, a final-log cursor, and a
@@ -24,8 +20,8 @@ socket, so a blocked sender does not directly block delivery to other clients.
 Broadcast still requires work proportional to the number of clients.
 
 `SOURCE_HELLO` and `CLIENT_HELLO` establish the connection role. Sources send
-`CAPTION_UPDATE` messages; receivers get `HISTORY` for initial recovery or connection followed
-by live `CAPTION_UPDATE` messages. Malformed source updates are ignored before
+`CAPTION_UPDATE` messages; receivers get `HISTORY` on initial connection or
+reconnect, followed by live `CAPTION_UPDATE` messages. Malformed source updates are ignored before
 state changes or broadcast, and `SOURCE_DONE` is not forwarded. Only one source
 is active at a time. The implementation assumes the supplied source's increasing
 segment and finalization order. State survives source disconnection in one shared
@@ -58,6 +54,8 @@ history transmission lie after the boundary and remain owed. Batches target
 64 captions and 256 KiB; an oversized caption travels alone and must fit the
 peer's message limit. Existing unfinished captions are absent from the snapshot
 and appear only on their next update.
+
+Appendix A shows history before live delivery and the reconnect sequence.
 
 **Recovery limits and local recall.** Finals enter a shared log once, with
 internal sequence numbers marking delivery progress for each client using an internal cursor recording the last delivered final message. They are retained for
@@ -301,7 +299,19 @@ delivery preserves isolation and bounded resource use.
 - [Latest Ubuntu T1-T5 comparison](../results/prob_ab_david/probe_ab/SUMMARY.md) and [recorded configuration](../results/prob_ab_david/probe_ab/configuration.json), including source hashes, environment and both arms' CSV/JSON files.
 - TODO: Cite external technical sources actually used.
 
+<div style="page-break-before: always;"></div>
+
 ## Appendices
+
+### Appendix A. Communication sequence
+
+![LiveRecall communication sequence](../diagrams/communication_sequence.png)
+
+*Figure A1. Connection setup, live revisions, local recall and reconnect recovery.
+Shared state access is grouped under Server; the [detailed component
+sequence](../diagrams/sequence.md) expands sender, buffer and probe interactions.*
+
+### Appendix B. Experiment evidence and reproduction
 
 Per-run CSV/JSON files and logs are stored alongside the
 [latest full comparison](../results/prob_ab_david/probe_ab/SUMMARY.md), under

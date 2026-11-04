@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 
 from markdown_pdf import MarkdownPdf, Section
 
@@ -33,11 +34,12 @@ def main() -> None:
     src = Path(args.input)
     out = Path(args.output)
     text = src.read_text(encoding="utf-8")
+    # Story's archive does not resolve ../ paths to sibling diagram assets.
+    text = re.sub(r"(!\[[^\]]*\]\()\.\./", r"\1", text)
 
     pdf = MarkdownPdf(toc_level=2)
     pdf.meta["title"] = "LiveRecall Technical Report"
-    # root= lets relative image paths in the Markdown resolve from docs/.
-    pdf.add_section(Section(text, root=str(src.parent)), user_css=CSS)
+    pdf.add_section(Section(text, root=str(src.parent.parent)), user_css=CSS)
     out.parent.mkdir(parents=True, exist_ok=True)
     pdf.save(str(out))
     print(f"Wrote {out.relative_to(PROJECT_ROOT)}")
