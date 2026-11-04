@@ -1,0 +1,1 @@
+[{"kind":"netem","handle":"8001:","root":true,"refcnt":2,"options":{"limit":1000,"delay":{"delay":0.12,"jitter":0.03,"correlation":0},"loss-random":{"loss":0.03,"correlation":0},"ecn":false,"gap":0},"bytes":23465981,"packets":283755,"drops":8625,"overlimits":0,"requeues":0,"backlog":0,"qlen":0}]
