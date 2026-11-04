@@ -296,7 +296,6 @@ delivery preserves isolation and bounded resource use.
 
 - CS3103 Assignment 4 specification, Sections 8-12 (experiments, metrics, environment, report requirements).
 - [Latest Ubuntu T1-T5 comparison](../results/prob_ab_david/probe_ab/SUMMARY.md) and [recorded configuration](../results/prob_ab_david/probe_ab/configuration.json), including source hashes, environment and both arms' CSV/JSON files.
-- TODO: Cite external technical sources actually used.
 
 <div style="page-break-before: always;"></div>
 
