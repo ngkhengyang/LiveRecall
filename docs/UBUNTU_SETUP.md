@@ -15,16 +15,29 @@ Install the mandatory packages if needed:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip iproute2
+sudo apt install -y make python3 python3-venv python3-pip iproute2
 ```
 
-Create a virtual environment:
+From the repository root **inside Ubuntu**, create a Python 3.10+ environment,
+install the mandatory dependencies, load netem, and check server startup:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+make install-VM
+make exp-probe-quick
+make exp-probe-t5
 ```
+
+`install-VM` prepares an existing Ubuntu system; it does not install Multipass or
+create/start a VM. All Make targets use `venv/` by default. For a different
+environment use the same override throughout, for example
+`make install-VM VENV=/home/ubuntu/envs/liverecall` and
+`make exp-probe-t5 VENV=/home/ubuntu/envs/liverecall`.
+
+The quick target runs T1 once per configuration. The T5 target runs 100 clients
+for 40 seconds, three independent runs with probes and three without, using
+the supplied delay/jitter/loss profile. For the complete comparison, run
+`make exp-probe` (T1–T5, three runs per configuration). See
+[the experiment guide](../experiments/README.md) for evidence files and sudo needs.
 
 ## Optional Multipass on macOS or Windows
 
@@ -41,8 +54,13 @@ Inside Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip iproute2
+sudo apt install -y make python3 python3-venv python3-pip iproute2
 ```
+
+Clone or copy the repository into Ubuntu before running the Make commands above.
+Create its Python environment in Ubuntu; do not copy a host virtual environment.
+For an existing VM, use `multipass start liverecall` and
+`multipass shell liverecall` instead of launching another one.
 
 When finished, exit the VM shell and run on the host:
 

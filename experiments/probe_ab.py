@@ -5,9 +5,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
+import hashlib
+from importlib.metadata import version
 import json
 import math
+import os
 from pathlib import Path
+import platform
 import shutil
 import socket
 import statistics
@@ -140,6 +145,42 @@ def write_configuration(out, args, tests):
         "test_args": {test: TESTS[test] for test in tests},
         "runs": args.runs,
         "port": args.port,
+        "require_t5": args.require_t5,
+        "environment": {
+            "started_utc": datetime.now(timezone.utc).isoformat(),
+            "platform": platform.platform(),
+            "os_release": (
+                Path("/etc/os-release").read_text()
+                if Path("/etc/os-release").exists()
+                else None
+            ),
+            "python": sys.version,
+            "python_executable": str(args.python),
+            "websockets": version("websockets"),
+            "cpu_count": os.cpu_count(),
+            "memory": (
+                Path("/proc/meminfo").read_text()
+                if Path("/proc/meminfo").exists()
+                else None
+            ),
+        },
+        "source_sha256": {
+            str(path.relative_to(REPO)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(
+                list((REPO / "submission_root/app").glob("*.py"))
+                + list((REPO / "submission_root/client").glob("*.*"))
+                + list((REPO / "test").glob("*.py"))
+                + [
+                    REPO / "submission_root/solution_server.py",
+                    REPO / "submission_root/requirements.txt",
+                    REPO / "test/sample_transcript.txt",
+                    REPO / "network_profiles/delay_loss.sh",
+                    REPO / "network_profiles/reset.sh",
+                    REPO / "Makefile",
+                    REPO / "experiments/probe_ab.py",
+                ]
+            )
+        },
         "outcomes": {},
     }
     save_configuration(out, config)
@@ -276,12 +317,13 @@ def summarise(out, tests, config):
             verdicts.append(f"{test.upper()}: run failed; no verdict")
         else:
             verdicts.append(verdict(test, runs, config["runs"]))
-    t3 = {arm: load_runs(out, "t3", arm) for arm in ARMS}
-    lines.append(section5(t3))
-    if "t3" not in tests or any(len(t3[arm]) != config["runs"] for arm in ARMS):
-        lines.append(
-            "\nT3 results unavailable or incomplete; rerun T3 before using this table."
-        )
+    if "t3" in tests:
+        t3 = {arm: load_runs(out, "t3", arm) for arm in ARMS}
+        lines.append(section5(t3))
+        if any(len(t3[arm]) != config["runs"] for arm in ARMS):
+            lines.append(
+                "\nT3 results unavailable or incomplete; rerun T3 before using this table."
+            )
     lines.extend(["\n## Verdicts", ""] + verdicts)
     lines.append(
         "\nRange separation is descriptive, not a significance test; one run cannot estimate spread."
@@ -370,28 +412,84 @@ def network_command(arguments, log):
         return False
 
 
+def capture_qdisc(out, name, log):
+    """Save kernel counters and return the actual loopback qdisc state."""
+    result = subprocess.run(
+        ["sudo", "-n", "tc", "-j", "-s", "qdisc", "show", "dev", "lo"],
+        stdout=subprocess.PIPE,
+        stderr=log,
+        text=True,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"Cannot inspect loopback qdisc; see {out / 't5_network.log'}"
+        )
+    (out / f"qdisc_{name}.json").write_text(result.stdout, encoding="utf-8")
+    return json.loads(result.stdout)
+
+
+def t5_unavailable(out, args, log, reason):
+    log.write(reason + "\n")
+    log.flush()
+    if args.require_t5:
+        raise RuntimeError(
+            f"T5 is required: {reason}. Run make install-VM inside Ubuntu and "
+            f"ensure sudo is available. See {out / 't5_network.log'}"
+        )
+    print(SKIPPED, flush=True)
+    return {"skipped": True, "reason": reason}
+
+
 def run_t5(out, args, index, total):
     """Apply netem when available and always attempt its reset, even on Ctrl-C."""
     with (out / "t5_network.log").open("w", encoding="utf-8") as log:
-        if not network_command(["tc", "qdisc", "show", "dev", "lo"], log):
-            print(SKIPPED, flush=True)
-            return {"skipped": True}
+        if sys.platform != "linux" or not shutil.which("tc"):
+            return t5_unavailable(out, args, log, "Linux tc/netem is unavailable")
+        if not network_command(["true"], log):
+            # Authenticate at T5 time: the earlier T1-T4 runs can outlast a
+            # sudo timestamp. Automated runs need existing noninteractive sudo.
+            if sys.stdin.isatty():
+                subprocess.run(["sudo", "-v"], check=False)
+            if not network_command(["true"], log):
+                return t5_unavailable(out, args, log, "sudo authentication failed")
+        before = capture_qdisc(out, "before", log)
+        if any(qdisc["kind"] != "noqueue" for qdisc in before):
+            raise RuntimeError("Loopback already has a qdisc; reset it before T5")
+        status = {"profile_applied": False, "reset_ok": False}
         try:
             # delay_loss.sh deletes any existing root qdisc first, so reset afterwards
             # even when applying netem itself fails part-way.
             if not network_command(
                 ["bash", str(REPO / "network_profiles/delay_loss.sh"), "lo"], log
             ):
-                print(SKIPPED, flush=True)
-                return {"skipped": True}
+                return t5_unavailable(
+                    out, args, log, "netem profile could not be applied"
+                )
+            applied = capture_qdisc(out, "applied", log)
+            if not any(qdisc["kind"] == "netem" for qdisc in applied):
+                raise RuntimeError("T5 profile command succeeded but netem is absent")
+            status["profile_applied"] = True
             return run_arms(out, "t5", args, index, total)
         finally:
-            if not network_command(
+            try:
+                capture_qdisc(out, "after_test", log)
+            except (OSError, ValueError, RuntimeError) as exc:
+                log.write(f"Could not capture final counters: {exc}\n")
+            reset = network_command(
                 ["bash", str(REPO / "network_profiles/reset.sh"), "lo"], log
-            ):
-                print(
-                    f"T5: network reset failed; see {out / 't5_network.log'}",
-                    flush=True,
+            )
+            try:
+                restored = capture_qdisc(out, "after_reset", log)
+                status["reset_ok"] = reset and all(
+                    qdisc["kind"] == "noqueue" for qdisc in restored
+                )
+            finally:
+                (out / "t5_network_status.json").write_text(
+                    json.dumps(status, indent=2) + "\n", encoding="utf-8"
+                )
+            if not status["reset_ok"]:
+                raise RuntimeError(
+                    "T5 network reset failed; run sudo bash network_profiles/reset.sh lo"
                 )
 
 
@@ -402,6 +500,11 @@ def main():
     parser.add_argument("--port", type=int, default=8811)
     parser.add_argument("--out", type=Path, default=Path("output/probe_ab"))
     parser.add_argument("--summary-only", action="store_true")
+    parser.add_argument(
+        "--require-t5",
+        action="store_true",
+        help="fail instead of skipping T5 when sudo or Linux netem is unavailable",
+    )
     parser.add_argument(
         "--venv",
         type=Path,
@@ -421,6 +524,15 @@ def main():
         )
     if args.runs < 1 or not 1 <= args.port <= 65535:
         parser.error("--runs must be positive and --port must be in 1..65535")
+    if (
+        not args.summary_only
+        and args.require_t5
+        and "t5" in tests
+        and sys.platform != "linux"
+    ):
+        parser.error(
+            "T5 requires Ubuntu Linux; enter the VM before running this command"
+        )
     out = validate_out(args.out if args.out.is_absolute() else REPO / args.out)
     if not args.summary_only:
         args.python = resolve_python(args.venv)

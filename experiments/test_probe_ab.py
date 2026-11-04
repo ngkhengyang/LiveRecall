@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -66,6 +67,69 @@ class DeletionTests(unittest.TestCase):
                 self.assertTrue(escaped.is_dir())
                 probe_ab.remove_variant(variant, out)
                 self.assertFalse(variant.exists())
+
+
+class NetworkTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out = Path(self.temp.name)
+        self.args = SimpleNamespace(require_t5=True)
+        self.noqueue = [{"kind": "noqueue"}]
+        self.netem = [{"kind": "netem"}]
+        self.addCleanup(patch.stopall)
+        patch.object(probe_ab.sys, "platform", "linux").start()
+        patch.object(probe_ab.shutil, "which", return_value="/usr/sbin/tc").start()
+        patch.object(probe_ab.sys.stdin, "isatty", return_value=False).start()
+
+    def test_required_t5_fails_when_sudo_is_unavailable(self):
+        with patch.object(probe_ab, "network_command", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "sudo authentication failed"):
+                probe_ab.run_t5(self.out, self.args, 0, 2)
+
+    def test_failed_profile_still_resets_and_does_not_become_a_pass(self):
+        with patch.object(
+            probe_ab, "network_command", side_effect=[True, False, True]
+        ) as network:
+            with patch.object(probe_ab, "capture_qdisc", return_value=self.noqueue):
+                with self.assertRaisesRegex(RuntimeError, "could not be applied"):
+                    probe_ab.run_t5(self.out, self.args, 0, 2)
+        self.assertIn("reset.sh", network.call_args.args[0][1])
+
+    def test_runner_failure_still_restores_network(self):
+        with patch.object(probe_ab, "network_command", return_value=True):
+            with patch.object(
+                probe_ab,
+                "capture_qdisc",
+                side_effect=[self.noqueue, self.netem, self.netem, self.noqueue],
+            ):
+                with patch.object(probe_ab, "run_arms", side_effect=KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        probe_ab.run_t5(self.out, self.args, 0, 2)
+        self.assertIn(
+            '"reset_ok": true', (self.out / "t5_network_status.json").read_text()
+        )
+
+    def test_leftover_netem_makes_successful_trials_fail(self):
+        with patch.object(probe_ab, "network_command", return_value=True):
+            with patch.object(
+                probe_ab,
+                "capture_qdisc",
+                side_effect=[self.noqueue, self.netem, self.netem, self.netem],
+            ):
+                with patch.object(
+                    probe_ab, "run_arms", return_value={"with_probe": 0, "no_probe": 0}
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "network reset failed"):
+                        probe_ab.run_t5(self.out, self.args, 0, 2)
+
+    def test_existing_impairment_is_preserved(self):
+        with patch.object(probe_ab, "network_command", return_value=True) as network:
+            with patch.object(probe_ab, "capture_qdisc", return_value=self.netem):
+                with self.assertRaisesRegex(RuntimeError, "already has a qdisc"):
+                    probe_ab.run_t5(self.out, self.args, 0, 2)
+        self.assertEqual(network.call_args_list[0].args[0], ["true"])
+        self.assertEqual(network.call_count, 1)
 
 
 if __name__ == "__main__":
