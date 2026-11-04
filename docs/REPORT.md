@@ -125,9 +125,7 @@ T1-T5 use the complete Ubuntu run added in commit `e0f7fd9`, archived in
 `results/prob_ab_david/probe_ab/`. The recorded environment on 4 November 2026
 was Ubuntu 26.04.1 LTS, Linux 7.0.0-42-generic x86_64, one vCPU, approximately
 3.32 GiB RAM, Python 3.14.4 and websockets 16.1.1. All recorded source hashes
-match the current application, public harness and experiment scripts. This
-replaces the earlier ARM64 VM evidence; differences between the evidence sets
-do not measure an implementation change.
+match the current application, public harness and experiment scripts.
 
 The source uses nominal 200-ms revision delays and 350-ms segment gaps; other
 settings are seed 3103, a one-second source start delay, 30-second history,
@@ -261,15 +259,11 @@ deadline was not measured.
 
 ## 6. Discussion, limitations and future work
 
-**Failures and trade-offs.** T3 normal-reader P95 was 23.88 ms with 100%
-final completeness, while slow readers had 93.82% median completeness and
-8.49-s P95 age. Normal readers stayed responsive, but slow readers still
-missed finals generated within the measurement window. T5 received all expected
-finals but exceeded the 500-ms freshness threshold at P95. Coalescing reduces
-obsolete draft traffic at the cost of intermediate revision coverage. Longer
-catch-up leases discourage repeated overload but can postpone the return to
-full revisions after a receiver improves. Delivery traces are needed to locate
-where slow-reader finals remain pending at the measurement deadline.
+**Failures and trade-offs.** Normal readers stayed responsive in T3, but slow
+readers still missed finals generated within the measurement window. Coalescing
+reduces obsolete draft traffic at the cost of intermediate revisions. Longer
+catch-up leases discourage repeated overload but can delay full revision
+delivery after a receiver improves.
 
 **Limitations.** Lag detection measures transport responsiveness without
 measuring the receiver's caption-processing rate. Healthy pongs can therefore
@@ -282,15 +276,11 @@ workload-dependent: the shared final log has an age limit but no byte cap, so
 caption bursts or large texts can increase memory consumption despite the
 per-client queue limits.
 
-**Future work.** Our objective is 100% final completeness in T3 and a faster
-return to full revision delivery after a temporary slowdown, within the existing
-queue bounds. We will first trace unreceived finals, then compare burst limits
-and catch-up lease policies in repeated, matched T3 and slowdown/recovery tests.
-Completeness and caption age will be compared at the same observation deadline.
-After restoring normal reading speed, we will measure the time until all newly
-generated revisions are received consistently. Normal-client latency, peak queue
-usage, and process memory will be monitored to check that improved slow-client
-delivery preserves isolation and bounded resource use.
+**Future work.** We aim for 100% T3 final completeness and faster recovery to
+full revision delivery. We will trace missing finals and compare burst limits
+and catch-up leases in repeated, matched tests, measuring completeness and
+caption age at the same deadline, and recovery time after normal reading resumes.
+We will also monitor normal-client latency, peak queue usage and process memory.
 
 ## References
 
@@ -330,3 +320,5 @@ venv/bin/python -u experiments/probe_ab.py --tests t1,t2,t3,t4,t5 --runs 3 \
 
 [Earlier ARM64 results and run caveats](../results/TEST_RESULTS_20261104.md)
 remain available for comparison; their values are not used in Sections 4-5.
+The current Ubuntu evidence replaces those runs; differences between the evidence
+sets do not measure an implementation change.
