@@ -251,8 +251,7 @@ final in both configurations; median slow-reader completeness increased from
 51.32% to 93.82%. Earlier lag detection and coalescing are consistent with
 reduced backlog. Both configurations had identical 95.18% overall live revision
 coverage, so coverage alone does not capture the improvement in final delivery.
-All with-probe runs preceded no-probe runs; these three-run differences remain
-descriptive rather than an isolated causal estimate.
+All with-probe runs preceded no-probe runs.
 
 T5 received 4,900 finals per with-probe run versus 4,899, 4,899 and 4,900 without
 probes. The trade-off was 1.12 pp lower live revision coverage. Median P95/P99
@@ -332,39 +331,3 @@ venv/bin/python -u experiments/probe_ab.py --tests t1,t2,t3,t4,t5 --runs 3 \
 
 [Earlier ARM64 results and run caveats](../results/TEST_RESULTS_20261104.md)
 remain available for comparison; their values are not used in Sections 4-5.
-
-## Draft completion checklist (remove before export)
-
-The assignment specifies **4-5 main pages, excluding references/appendices**;
-it does not prescribe font size or margins. Use a readable export (for example,
-A4, 11 pt text, 20 mm margins) and verify the rendered PDF after completing all
-TODOs. Do not add a separate cover page. The following budgets are drafting
-targets, not assignment rules; they include space for headings and tables.
-
-| Main section | Page allowance | Prose target |
-|---|---:|---:|
-| 1. Architecture and protocol | 0.90 | 350 words |
-| 2. Revision and recovery | 0.65 | 300 words |
-| 3. Backpressure and overload | 0.65 | 300 words |
-| 4. Experiments and results | 1.50 | 550 words plus the compact results tables |
-| 5. Optimization comparison | 0.55 | 225 words plus one comparison table |
-| 6. Discussion and future work | 0.50 | 175 words |
-| Total | 4.75 | About 1,900 words plus tables |
-
-Replace TODO instructions with final prose and measurements within these budgets.
-Keep architecture concise; a method-by-method walkthrough belongs in an appendix.
-Leave the remaining 0.25 page for the title, team line, and layout variation.
-An A4/11 pt/20 mm-margin layout projection expanded to these prose targets, with
-the existing tables, rendered to five main pages. This is a planning check;
-verify again after replacing placeholders and adding any figures. Replace a
-table with a figure where useful instead of continually adding material.
-
-- [ ] All required sections are supported by the submitted implementation and evidence; no TODOs remain.
-- [ ] Sections 2-3 explain actual rules, numeric bounds, and failure/recovery limits.
-- [ ] Results cover all required metrics, recovery time, isolation, and bounded resource usage.
-- [ ] The separate deterministic browser demo covers revision replacement, local recall, reconnect, and late join.
-- [ ] T1–T5 each have at least three independent runs; medians and units are clear.
-- [ ] At least one stress-test before/after comparison is quantified and reproducible.
-- [ ] The main report is 4–5 pages after PDF export, excluding references/appendices.
-- [ ] The reviewed PDF is saved as `submission_root/report.pdf`.
-- [ ] README, AI usage, contributions and the separate 5–7-minute demo video are completed.
