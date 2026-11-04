@@ -1,6 +1,6 @@
 # LiveRecall Technical Report
 
-Members: David Goh, Ng Kheng Yang, Isabel Wang, Qin Haichen
+Members: David Goh, Ng Kheng Yang, Wang Yanxiang, Qin Haichen
 
 ## 1. Architecture and protocol
 
